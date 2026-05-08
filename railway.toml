@@ -1,0 +1,37 @@
+# Railway deploy config.
+#
+# Railway autodetects Dockerfile-based services; this file pins the
+# build + run steps explicitly so the deploy is reproducible across
+# Railway projects (staging, production, ephemeral PR previews if
+# enabled).
+#
+# Postgres is a separate Railway service in the same project; the
+# `DATABASE_URL` env var is auto-wired by Railway when you add the
+# Postgres plugin and reference it from this service.
+#
+# Required env vars (set in Railway UI):
+#
+# - `DATABASE_URL`           — auto-wired from the Postgres plugin
+# - `CHAIN_RPC`              — `https://rpc.ligate.io` for production
+# - `CHAIN_ID`               — numeric, from chain_state.json
+# - `CHAIN_HASH`             — 64-char hex, from /v1/rollup/info
+# - `LGT_TOKEN_ID`           — 64-char hex, from bank.json
+# - `DRIP_SIGNER_KEY`        — 64-char hex (Railway "Secret" type)
+# - `DRIP_AMOUNT`            — optional, default 100_000_000_000 (100 LGT)
+# - `DRIP_RATE_LIMIT_SECS`   — optional, default 86400 (24h)
+# - `DRIP_MIN_BUDGET`        — optional, default 100 (drips)
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Railway exposes the chosen port via the `PORT` env var; bind to it
+# so the platform's reverse-proxy reaches us.
+startCommand = "/usr/local/bin/ligate-api"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+
+# Health check — Railway pings this to know when the service is up.
+healthcheckPath = "/health"
+healthcheckTimeout = 30

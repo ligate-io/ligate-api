@@ -1,0 +1,52 @@
+[package]
+name = "ligate-api"
+description = "Unified HTTP API for Ligate Chain. Drip (faucet) + indexer queries on a single domain. Backs explorer.ligate.io. Deploys to Railway."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ligate-api"
+path = "src/main.rs"
+
+[dependencies]
+ligate-api-drip    = { workspace = true }
+ligate-api-indexer = { workspace = true }
+ligate-api-types   = { workspace = true }
+
+# HTTP server
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+
+# Async + runtime
+tokio.workspace = true
+
+# Postgres (query endpoints read directly; indexer writes)
+sqlx.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Errors
+anyhow.workspace = true
+
+# Serde
+serde.workspace = true
+serde_json.workspace = true
+
+# Time
+chrono.workspace = true
+
+# Hex (for token id parsing during boot)
+hex.workspace = true
+
+# Sov-bank for TokenId during drip-state boot
+sov-bank        = { workspace = true }
+sov-modules-api = { workspace = true }

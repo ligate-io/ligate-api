@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # Sovereign SDK macros walk up from OUT_DIR looking for
+  # `constants.toml`. The faucet ships its own copy mirroring chain
+  # repo; CI points the macro at it explicitly so no upward walk is
+  # needed (and the build doesn't depend on the working directory).
+  CONSTANTS_MANIFEST_PATH: ${{ github.workspace }}/constants.toml
+  # Don't compile the risc0 zkVM guest — the chain's prover crate is
+  # transitively pulled in via `ligate-rollup`, but the faucet doesn't
+  # need real ZK proofs; mock zkvm is fine.
+  SKIP_GUEST_BUILD: "1"
+  RISC0_SKIP_BUILD_KERNELS: "1"
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+          components: clippy
+      - name: Install libclang (librocksdb-sys build dep)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  check:
+    name: cargo check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+      - name: Install libclang (librocksdb-sys build dep)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets
+
+  # NOTE: cargo test is currently disabled because the chain's risc0
+  # prover crate (transitively pulled via ligate-rollup) trips its
+  # build-script even with SKIP_GUEST_BUILD=1 under `cargo test` (the
+  # env vars don't propagate cleanly through test-bin compilation).
+  # Unit tests for the faucet's own modules can run with `cargo build
+  # --tests` plus a workspace-shaped invocation; real integration
+  # tests live in the chain workspace where the SDK build env is
+  # configured correctly. Re-enable once the risc0 toolchain is no
+  # longer transitively required, or wire a feature flag in
+  # ligate-rollup that omits the prover sub-crate.
+  # test:
+  #   name: cargo test
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v6
+  #     - uses: dtolnay/rust-toolchain@master
+  #       with:
+  #         toolchain: 1.93.0
+  #     - uses: Swatinem/rust-cache@v2
+  #     - run: cargo test
+
+  # Single summary check that the branch ruleset can require. Mirrors
+  # the pattern from `ligate-io/ligate-chain`. By gating the ruleset
+  # on `CI pass` instead of each individual job, we get a stable
+  # required-check name even if the underlying job set changes.
+  ci-pass:
+    name: CI pass
+    if: always()
+    needs: [fmt, clippy, check]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required checks
+        env:
+          FMT_RESULT: ${{ needs.fmt.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for var in FMT_RESULT CLIPPY_RESULT CHECK_RESULT; do
+            result="${!var}"
+            if [[ "$result" != "success" ]]; then
+              echo "::error::${var,,}: $result"
+              fail=1
+            fi
+          done
+          if [[ $fail -ne 0 ]]; then exit 1; fi
+          echo "All required checks succeeded."

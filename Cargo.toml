@@ -1,0 +1,93 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/api",
+    "crates/drip",
+    "crates/indexer",
+    "crates/types",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+authors = ["Ligate Labs <hello@ligate.io>"]
+repository = "https://github.com/ligate-io/ligate-api"
+homepage = "https://ligate.io"
+publish = false
+rust-version = "1.93"
+
+[workspace.dependencies]
+# Internal — keep paths so each crate compiles standalone for tests.
+ligate-api-drip    = { path = "crates/drip", version = "0.0.1" }
+ligate-api-indexer = { path = "crates/indexer", version = "0.0.1" }
+ligate-api-types   = { path = "crates/types", version = "0.0.1" }
+
+# HTTP server
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+
+# Async + runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# HTTP client (chain RPC reads, indexer pulls)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Postgres (indexer state, drip rate-limit history)
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+    "chrono",
+    "json",
+    "bigdecimal",
+    "migrate",
+] }
+
+# Serde + JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Borsh for transaction encoding (drip)
+borsh = { version = "1", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Errors
+anyhow = "1"
+thiserror = "2"
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+
+# Rate limiting (in-memory map of address -> last-drip-at; survives across
+# restarts via Postgres backstop, but the hot path is the in-memory map).
+dashmap = "6"
+
+# CLI / env
+clap = { version = "4", features = ["derive", "env"] }
+
+# Misc
+hex = "0.4"
+url = "2"
+
+# Chain crates (git deps; pin via branch=main until chain ships a stable rev).
+ligate-client = { git = "https://github.com/ligate-io/ligate-chain.git", branch = "main", features = ["submit"] }
+ligate-stf    = { git = "https://github.com/ligate-io/ligate-chain.git", branch = "main", features = ["native"] }
+ligate-rollup = { git = "https://github.com/ligate-io/ligate-chain.git", branch = "main" }
+attestation   = { git = "https://github.com/ligate-io/ligate-chain.git", branch = "main", features = ["native"] }
+
+# Sovereign SDK pieces we directly construct.
+sov-bank        = { git = "https://github.com/Sovereign-Labs/sovereign-sdk.git", rev = "f89964c66bcfb6a31712e43278378b54c33d3779", features = ["native"] }
+sov-modules-api = { git = "https://github.com/Sovereign-Labs/sovereign-sdk.git", rev = "f89964c66bcfb6a31712e43278378b54c33d3779", features = ["native"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

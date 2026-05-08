@@ -1,0 +1,279 @@
+//! Wire types for the Ligate Chain REST API.
+//!
+//! Mirrors the JSON shapes documented in the chain repo's
+//! [`docs/protocol/rest-api.md`].
+//!
+//! These are deserialization-only types deliberately decoupled from
+//! the protocol crates in `ligate-io/ligate-chain`. Indexers,
+//! explorers, and third-party API clients can depend on this crate
+//! without pulling the chain workspace plus the pinned Sovereign SDK
+//! revision as transitive dependencies.
+//!
+//! [`docs/protocol/rest-api.md`]:
+//!   https://github.com/ligate-io/ligate-chain/blob/main/docs/protocol/rest-api.md
+
+#![deny(missing_docs)]
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Bech32m HRP for chain addresses (`lig1...`).
+pub const ADDRESS_HRP: &str = "lig";
+/// Bech32m HRP for ed25519 public keys (`lpk1...`).
+pub const PUBKEY_HRP: &str = "lpk";
+/// Bech32m HRP for schema ids (`lsc1...`).
+pub const SCHEMA_HRP: &str = "lsc";
+/// Bech32m HRP for attestor set ids (`las1...`).
+pub const ATTESTOR_SET_HRP: &str = "las";
+/// Bech32m HRP for payload hashes (`lph1...`).
+pub const PAYLOAD_HASH_HRP: &str = "lph";
+
+// ============================================================================
+// Rollup meta (`/v1/rollup/...`)
+// ============================================================================
+
+/// `GET /v1/rollup/info` body.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RollupInfo {
+    /// Wallet/explorer-facing chain id, e.g. `ligate-devnet-1`.
+    pub chain_id: String,
+    /// Build-time fingerprint of the runtime, 64-char hex.
+    pub chain_hash: String,
+    /// Binary semver.
+    pub version: String,
+}
+
+/// `GET /v1/rollup/sync-status` body.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SyncStatus {
+    /// Whether the node is caught up to the DA layer head.
+    pub synced: bool,
+    /// DA height the node has processed up to.
+    #[serde(default)]
+    pub synced_da_height: Option<u64>,
+    /// DA height the node is trying to reach.
+    #[serde(default)]
+    pub target_da_height: Option<u64>,
+}
+
+// ============================================================================
+// Attestation custom routes (`/v1/modules/attestation/...`)
+// ============================================================================
+
+/// `GET /v1/modules/attestation/schemas/{schemaId}` body.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SchemaResponse {
+    /// The schema record.
+    pub schema: Schema,
+}
+
+/// One registered attestation schema.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Schema {
+    /// Bech32m schema id (`lsc1...`).
+    pub id: String,
+    /// Bech32m owner address (`lig1...`).
+    pub owner: String,
+    /// Schema name.
+    pub name: String,
+    /// Schema version, monotonic per (owner, name).
+    pub version: u32,
+    /// Bech32m attestor set id (`las1...`) bound to this schema.
+    pub attestor_set: String,
+    /// Builder fee routing in basis points, 0 to 5000.
+    pub fee_routing_bps: u16,
+    /// Builder fee routing destination, present iff `fee_routing_bps > 0`.
+    pub fee_routing_addr: Option<String>,
+}
+
+/// `GET /v1/modules/attestation/attestor-sets/{attestorSetId}` body.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AttestorSetResponse {
+    /// The attestor set record.
+    pub attestor_set: AttestorSet,
+}
+
+/// One registered attestor set.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AttestorSet {
+    /// Bech32m attestor set id (`las1...`).
+    pub id: String,
+    /// Member ed25519 pubkeys, each `lpk1...`.
+    pub members: Vec<String>,
+    /// M-of-N signature threshold.
+    pub threshold: u32,
+}
+
+/// `GET /v1/modules/attestation/attestations/{schemaId}:{payloadHash}` body.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AttestationResponse {
+    /// The attestation record.
+    pub attestation: Attestation,
+}
+
+/// One submitted attestation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Attestation {
+    /// Bech32m schema id (`lsc1...`).
+    pub schema_id: String,
+    /// Bech32m payload hash (`lph1...`).
+    pub payload_hash: String,
+    /// Bech32m submitter address (`lig1...`).
+    pub submitter: String,
+    /// Unix-seconds timestamp.
+    pub timestamp: u64,
+    /// One signature per attesting member.
+    pub signatures: Vec<AttestorSignature>,
+}
+
+/// One attestor signature inside an [`Attestation`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AttestorSignature {
+    /// Bech32m signer pubkey (`lpk1...`).
+    pub pubkey: String,
+    /// Hex-encoded signature bytes.
+    pub sig: String,
+}
+
+// ============================================================================
+// Bank custom routes (`/v1/modules/bank/...`)
+// ============================================================================
+
+/// `GET /v1/modules/bank/tokens/gas_token/balances/{address}` body.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BankBalanceResponse {
+    /// Wrapped balance payload.
+    pub data: BankBalance,
+}
+
+/// One holder's balance for one token.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BankBalance {
+    /// Balance in base units (nanos for `$LGT`), serialized as a string
+    /// because the chain returns `u64` as a JSON string to avoid loss
+    /// of precision in JS clients.
+    pub amount: String,
+    /// Token id this balance is for.
+    pub token_id: String,
+}
+
+// ============================================================================
+// Ledger ("blocks", batches, transactions, events)
+// ============================================================================
+//
+// The ledger surface is more shape-shifty between releases than the
+// bespoke routes above. We retain the raw `serde_json::Value` payload
+// alongside loosely-typed fields and let the indexer extract typed
+// data progressively. This keeps the wire-types crate from breaking
+// every time the SDK adds a field.
+
+/// `GET /v1/ledger/slots/{slotId}` body. Mirrors the SDK's `Slot`
+/// shape; treat fields as best-effort and the `raw` payload as
+/// authoritative for anything not yet typed here.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SlotResponse {
+    /// Slot height (rollup-side).
+    pub number: u64,
+    /// Hash of this slot.
+    pub hash: String,
+    /// Hash of the previous slot.
+    #[serde(default)]
+    pub prev_hash: Option<String>,
+    /// Unix-seconds timestamp.
+    #[serde(default)]
+    pub timestamp: Option<u64>,
+    /// State root after this slot.
+    #[serde(default)]
+    pub state_root: Option<String>,
+    /// Number of batches in this slot.
+    #[serde(default)]
+    pub batch_count: Option<u64>,
+    /// Number of transactions across all batches in this slot.
+    #[serde(default)]
+    pub tx_count: Option<u64>,
+    /// Catch-all so unknown fields round-trip without loss.
+    #[serde(flatten)]
+    pub raw: std::collections::BTreeMap<String, Value>,
+}
+
+/// `GET /v1/ledger/txs/{txId}` body, lossy-typed.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TxResponse {
+    /// Transaction hash.
+    pub hash: String,
+    /// Slot height the tx was included in.
+    #[serde(default)]
+    pub slot_number: Option<u64>,
+    /// Inclusion status.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Catch-all for fields the typed shape does not yet model.
+    #[serde(flatten)]
+    pub raw: std::collections::BTreeMap<String, Value>,
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rollup_info_round_trip() {
+        let body = r#"{"chain_id":"ligate-devnet-1","chain_hash":"abcd","version":"0.0.1"}"#;
+        let parsed: RollupInfo = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.chain_id, "ligate-devnet-1");
+        assert_eq!(parsed.chain_hash, "abcd");
+        assert_eq!(parsed.version, "0.0.1");
+    }
+
+    #[test]
+    fn schema_response_round_trip() {
+        let body = r#"{
+            "schema": {
+                "id": "lsc1xyz",
+                "owner": "lig1abc",
+                "name": "themisra.proof-of-prompt",
+                "version": 1,
+                "attestor_set": "las1def",
+                "fee_routing_bps": 0,
+                "fee_routing_addr": null
+            }
+        }"#;
+        let parsed: SchemaResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.schema.id, "lsc1xyz");
+        assert_eq!(parsed.schema.fee_routing_bps, 0);
+        assert!(parsed.schema.fee_routing_addr.is_none());
+    }
+
+    #[test]
+    fn attestor_set_response_round_trip() {
+        let body = r#"{
+            "attestor_set": {
+                "id": "las1abc",
+                "members": ["lpk1one", "lpk1two", "lpk1three"],
+                "threshold": 2
+            }
+        }"#;
+        let parsed: AttestorSetResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.attestor_set.members.len(), 3);
+        assert_eq!(parsed.attestor_set.threshold, 2);
+    }
+
+    #[test]
+    fn slot_response_preserves_unknown_fields() {
+        let body = r#"{
+            "number": 42,
+            "hash": "0xabc",
+            "prev_hash": "0xdef",
+            "timestamp": 1700000000,
+            "future_field": "future_value"
+        }"#;
+        let parsed: SlotResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.number, 42);
+        assert_eq!(parsed.raw.get("future_field").unwrap(), "future_value");
+    }
+}

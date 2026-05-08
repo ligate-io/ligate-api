@@ -1,0 +1,33 @@
+[package]
+name = "ligate-api-drip"
+description = "Drip (faucet) primitives: signer, rate-limiter, errors. No HTTP layer; that's `ligate-api`'s job."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+borsh.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+hex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# Chain-side crates for transaction construction + submission.
+ligate-client = { workspace = true }
+ligate-rollup = { workspace = true }
+ligate-stf    = { workspace = true }
+
+sov-bank        = { workspace = true }
+sov-modules-api = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
