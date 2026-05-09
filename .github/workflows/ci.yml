@@ -83,6 +83,59 @@ jobs:
   #     - uses: Swatinem/rust-cache@v2
   #     - run: cargo test
 
+  # Smoke-test every migration in `migrations/` against a fresh
+  # Postgres. Catches SQL syntax errors, constraint conflicts, and
+  # ordering bugs at PR time rather than at Railway deploy time.
+  #
+  # Uses Postgres 16 (matches Railway's plugin default). The
+  # `services:` block boots a container that's reachable on localhost
+  # for the duration of the job. We apply migrations with `psql -f`
+  # in filename order — sqlx's runtime applies them the same way.
+  migrate:
+    name: psql migrate (smoke)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ligate
+          POSTGRES_PASSWORD: ligate
+          POSTGRES_DB: ligate_indexer
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ligate -d ligate_indexer"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Apply migrations
+        env:
+          PGPASSWORD: ligate
+        run: |
+          set -euo pipefail
+          for f in $(ls migrations/*.sql | sort); do
+            echo "::group::${f}"
+            psql -h localhost -U ligate -d ligate_indexer -v ON_ERROR_STOP=1 -f "${f}"
+            echo "::endgroup::"
+          done
+      - name: Sanity-check tables exist
+        env:
+          PGPASSWORD: ligate
+        run: |
+          psql -h localhost -U ligate -d ligate_indexer -v ON_ERROR_STOP=1 -tAc "
+            SELECT table_name FROM information_schema.tables
+             WHERE table_schema = 'public' ORDER BY table_name
+          " | tee /tmp/tables.txt
+          # The set of tables the indexer query layer needs.
+          for required in slots indexer_state transactions attestor_sets schemas attestations address_summaries; do
+            if ! grep -qx "${required}" /tmp/tables.txt; then
+              echo "::error::missing table: ${required}"
+              exit 1
+            fi
+          done
+
   # Single summary check that the branch ruleset can require. Mirrors
   # the pattern from `ligate-io/ligate-chain`. By gating the ruleset
   # on `CI pass` instead of each individual job, we get a stable
@@ -90,7 +143,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [fmt, clippy, check]
+    needs: [fmt, clippy, check, migrate]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required checks
@@ -98,10 +151,11 @@ jobs:
           FMT_RESULT: ${{ needs.fmt.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           CHECK_RESULT: ${{ needs.check.result }}
+          MIGRATE_RESULT: ${{ needs.migrate.result }}
         run: |
           set -euo pipefail
           fail=0
-          for var in FMT_RESULT CLIPPY_RESULT CHECK_RESULT; do
+          for var in FMT_RESULT CLIPPY_RESULT CHECK_RESULT MIGRATE_RESULT; do
             result="${!var}"
             if [[ "$result" != "success" ]]; then
               echo "::error::${var,,}: $result"
