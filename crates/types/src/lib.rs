@@ -243,7 +243,11 @@ pub struct LedgerTx {
     #[serde(rename = "type")]
     pub r#type: String,
 
-    /// Globally unique tx hash, lowercase hex with `0x` prefix.
+    /// Globally unique tx hash. Bech32m-encoded with HRP `ltx`
+    /// (`ltx1...`) as of `ligate-chain` `0ac7e5b` and later;
+    /// pre-bech32m chain revs returned lowercase hex with `0x` prefix.
+    /// The indexer treats this opaquely: no format validation, just
+    /// pass-through into Postgres.
     pub hash: String,
 
     /// Global tx index (NOT position-in-batch). Position-in-batch is
@@ -344,7 +348,9 @@ pub struct LedgerEvent {
     /// `key` but exposed by the chain for convenience.
     pub module: ModuleRef,
 
-    /// Tx hash this event was emitted from. Lowercase hex with `0x`.
+    /// Tx hash this event was emitted from. Same format as
+    /// [`LedgerTx::hash`]: bech32m `ltx1...` on current chain, hex
+    /// `0x...` on pre-bech32m chain revs. Treated opaquely.
     pub tx_hash: String,
 }
 

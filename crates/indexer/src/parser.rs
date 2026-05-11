@@ -123,7 +123,9 @@ pub fn classify_tx(tx: &LedgerTx, events: &[&LedgerEvent]) -> Option<ClassifiedT
 /// One classified tx, ready for [`crate::db`] insertion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedTx {
-    /// Lowercase hex with `0x` prefix.
+    /// Tx hash as the chain serialised it. Bech32m `ltx1...` on
+    /// `ligate-chain` `0ac7e5b` and later; hex `0x...` on older chain
+    /// revs. The parser doesn't validate the format.
     pub hash: String,
     /// `LedgerTx.batch_number`. Resolves to slot via the
     /// `/v1/ledger/batches/{n}` lookup.
