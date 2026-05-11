@@ -179,13 +179,15 @@ async fn ingest_slot_transactions(
     };
 
     // Slot timestamp for first_seen / last_seen denormalisation.
-    // SlotResponse carries it as Option<u64> (Unix seconds); fall
+    // Chain emits Unix MILLISECONDS in `slot.timestamp`; routing
+    // through `timestamp_millis_opt` keeps `address_summaries`
+    // first_seen / last_seen in sync with `slots.timestamp`. Fall
     // back to UNIX_EPOCH so the field is never null at the address
     // summary level (the `first_seen` / `last_seen` CHECK constraints
     // are all-or-nothing).
     let slot_timestamp: DateTime<Utc> = slot
         .timestamp
-        .and_then(|s| Utc.timestamp_opt(s as i64, 0).single())
+        .and_then(|ms| Utc.timestamp_millis_opt(ms as i64).single())
         .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
 
     // Fetch every event for this slot, grouped by `tx_hash`. One
@@ -214,10 +216,17 @@ async fn ingest_slot_transactions(
                 }
             };
 
-            // Group events for this tx by matching tx_hash. Cheap —
-            // typical slot has 1-5 txs and a handful of events each.
-            let tx_events: Vec<&LedgerEvent> =
-                all_events.iter().filter(|e| e.tx_hash == tx.hash).collect();
+            // Group events for this tx by matching tx_hash. The chain
+            // currently emits the tx-hash field in two different
+            // encodings on different endpoints (`ltx1...` on the tx
+            // detail, `0x{hex}` in the slot events list); normalise
+            // both to canonical hex before comparing so the filter
+            // catches them.
+            let tx_hash_canonical = parser::normalize_tx_hash(&tx.hash);
+            let tx_events: Vec<&LedgerEvent> = all_events
+                .iter()
+                .filter(|e| parser::normalize_tx_hash(&e.tx_hash) == tx_hash_canonical)
+                .collect();
 
             let raw_event_keys: Vec<String> = tx_events.iter().map(|e| e.key.clone()).collect();
 

@@ -58,9 +58,14 @@ pub async fn write_chain_identity(pool: &PgPool, info: &RollupInfo) -> Result<()
 /// Upsert one slot row. Idempotent on (height) primary key, so
 /// re-runs of backfill don't create duplicates.
 pub async fn upsert_slot(pool: &PgPool, slot: &SlotResponse) -> Result<()> {
+    // Chain emits `slot.timestamp` as Unix MILLISECONDS (verified
+    // against localnet: 1778527856952 → 2026-05-11T...). Earlier
+    // code parsed via `timestamp_opt(s, 0)` which treats the input
+    // as seconds — produces year +58329. `timestamp_millis_opt`
+    // is the right routing.
     let timestamp = slot
         .timestamp
-        .and_then(|s| Utc.timestamp_opt(s as i64, 0).single())
+        .and_then(|ms| Utc.timestamp_millis_opt(ms as i64).single())
         .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
 
     let raw = serde_json::to_value(slot).unwrap_or(serde_json::Value::Null);
