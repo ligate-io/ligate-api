@@ -170,16 +170,30 @@ impl Signer {
     /// Returns the balance as raw `u128` (nano-LGT), so the caller
     /// can divide by drip amount without an `Amount`-newtype roundtrip.
     pub async fn query_self_balance(&self) -> Result<u128, anyhow::Error> {
+        self.query_balance_for(&self.address()).await
+    }
+
+    /// Query the LGT balance of an arbitrary `lig1...` address via
+    /// the chain's bank module. Used by the api's
+    /// `/v1/addresses/{addr}` handler to surface a live gas-token
+    /// balance alongside the indexer's denormalised counters.
+    pub async fn query_balance_for(&self, address: &str) -> Result<u128, anyhow::Error> {
         use anyhow::Context;
-        let addr = self.address();
         let amount = self
             .submitter
             .inner()
-            .get_balance_for_holder::<S>(&addr, &self.lgt_token_id)
+            .get_balance_for_holder::<S>(address, &self.lgt_token_id)
             .await
-            .with_context(|| format!("querying LGT balance for {addr}"))?;
-        // `Amount` is a newtype around u128; pull the inner.
+            .with_context(|| format!("querying LGT balance for {address}"))?;
         Ok(amount.0)
+    }
+
+    /// Bech32m `token_1...` form of the gas-token id. Mirrors what
+    /// the chain emits on REST. Used by the api's address-summary
+    /// handler to surface `balances[].token_id` in the canonical
+    /// form partners reach for elsewhere.
+    pub fn lgt_token_id_bech32(&self) -> String {
+        self.lgt_token_id.to_bech32().to_string()
     }
 
     /// Sign and submit a `bank.transfer` of `amount_nano` from the

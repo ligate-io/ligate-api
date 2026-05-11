@@ -24,7 +24,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::cursor;
 use crate::queries;
-use crate::responses::{BlockResponse, InfoResponse, Page, Pagination, TxResponse};
+use crate::responses::{
+    AddressSummaryResponse, BlockResponse, InfoResponse, Page, Pagination, SeenAtResponse,
+    TxResponse,
+};
 use crate::AppState;
 
 /// Cursor shape for `/v1/blocks` (descending by slot height).
@@ -463,11 +466,72 @@ fn tx_row_to_response(row: queries::TxRow) -> TxResponse {
     }
 }
 
+/// `GET /v1/addresses/{addr}` — per-address activity summary.
+///
+/// Indexer-side counters + first/last seen come from the
+/// `address_summaries` Postgres table. Live balances are NOT in
+/// the indexer — they'd be stale by definition; the handler proxies
+/// chain RPC at read time.
+///
+/// v0 limitation: only the gas token balance (`config_gas_token_id`)
+/// is surfaced. Multi-token expansion is a follow-up — needs either
+/// a chain endpoint that lists all tokens an address holds (none
+/// today) or an indexer-side per-(address, token) ledger derived
+/// from `Bank/TokenTransferred` events (Phase F.2, not in this PR).
 pub async fn address_summary(
-    State(_state): State<AppState>,
-    Path(_addr): Path<String>,
+    State(state): State<AppState>,
+    Path(addr): Path<String>,
 ) -> impl IntoResponse {
-    not_implemented("/v1/addresses/{addr}")
+    // Indexer-side counters. Zero-row for unknown addresses (still
+    // a valid shape, just zeros).
+    let row = match queries::address_summary(&state.pg, &addr).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, %addr, "address_summary in /v1/addresses/{{addr}}");
+            return internal_error();
+        }
+    };
+
+    // Live gas-token balance via the drip signer's NodeClient (it
+    // already knows the LGT token id from boot config). On failure,
+    // surface an empty balances vec rather than 502'ing — counters
+    // are still useful even when chain RPC is briefly down.
+    let balances = match state.signer.query_balance_for(&addr).await {
+        Ok(b) => vec![crate::responses::TokenBalanceResponse {
+            token_id: state.signer.lgt_token_id_bech32(),
+            amount_nano: b.to_string(),
+        }],
+        Err(e) => {
+            tracing::warn!(error = %e, %addr, "chain balance lookup failed; surfacing empty balances");
+            Vec::new()
+        }
+    };
+
+    let first_seen = match (row.first_seen_slot, row.first_seen_timestamp) {
+        (Some(slot), Some(ts)) => Some(SeenAtResponse {
+            block_height: slot as u64,
+            timestamp: ts.to_rfc3339_opts(SecondsFormat::Millis, true),
+        }),
+        _ => None,
+    };
+    let last_seen = match (row.last_seen_slot, row.last_seen_timestamp) {
+        (Some(slot), Some(ts)) => Some(SeenAtResponse {
+            block_height: slot as u64,
+            timestamp: ts.to_rfc3339_opts(SecondsFormat::Millis, true),
+        }),
+        _ => None,
+    };
+
+    Json(AddressSummaryResponse {
+        address: addr,
+        balances,
+        tx_count: (row.txs_sent_count + row.txs_received_count) as u64,
+        first_seen,
+        last_seen,
+        schemas_owned_count: row.schemas_owned_count as u32,
+        attestor_member_count: row.attestor_member_count as u32,
+    })
+    .into_response()
 }
 
 pub async fn schemas_list(

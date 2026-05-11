@@ -310,6 +310,73 @@ pub async fn txs_page(
     Ok(rows.into_iter().map(tx_row_from_tuple).collect())
 }
 
+// ---- address_summaries -----------------------------------------------------
+
+/// One row of `address_summaries`, mapped to a Rust shape. The
+/// handler converts this to [`crate::responses::AddressSummaryResponse`]
+/// after augmenting with chain-side balances.
+#[derive(Debug)]
+pub struct AddressSummaryRow {
+    pub txs_sent_count: i64,
+    pub txs_received_count: i64,
+    pub first_seen_slot: Option<i64>,
+    pub first_seen_timestamp: Option<DateTime<Utc>>,
+    pub last_seen_slot: Option<i64>,
+    pub last_seen_timestamp: Option<DateTime<Utc>>,
+    pub schemas_owned_count: i32,
+    pub attestor_member_count: i32,
+}
+
+/// Read the summary row for one address. Returns a zeroed-out row
+/// (not `None`) when the address has no observed activity — partners
+/// asking about a fresh address get a coherent shape with zeros
+/// rather than a 404.
+pub async fn address_summary(pool: &PgPool, address: &str) -> sqlx::Result<AddressSummaryRow> {
+    #[allow(clippy::type_complexity)]
+    let row: Option<(
+        i64,
+        i64,
+        Option<i64>,
+        Option<DateTime<Utc>>,
+        Option<i64>,
+        Option<DateTime<Utc>>,
+        i32,
+        i32,
+    )> = sqlx::query_as(
+        "SELECT txs_sent_count, txs_received_count,
+                first_seen_slot, first_seen_timestamp,
+                last_seen_slot,  last_seen_timestamp,
+                schemas_owned_count, attestor_member_count
+         FROM address_summaries
+         WHERE address = $1",
+    )
+    .bind(address)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row
+        .map(|t| AddressSummaryRow {
+            txs_sent_count: t.0,
+            txs_received_count: t.1,
+            first_seen_slot: t.2,
+            first_seen_timestamp: t.3,
+            last_seen_slot: t.4,
+            last_seen_timestamp: t.5,
+            schemas_owned_count: t.6,
+            attestor_member_count: t.7,
+        })
+        .unwrap_or_else(|| AddressSummaryRow {
+            txs_sent_count: 0,
+            txs_received_count: 0,
+            first_seen_slot: None,
+            first_seen_timestamp: None,
+            last_seen_slot: None,
+            last_seen_timestamp: None,
+            schemas_owned_count: 0,
+            attestor_member_count: 0,
+        }))
+}
+
 #[allow(clippy::type_complexity)]
 fn tx_row_from_tuple(
     t: (
