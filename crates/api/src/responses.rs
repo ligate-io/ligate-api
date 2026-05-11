@@ -150,6 +150,67 @@ pub struct TxResponse {
     pub revert_reason: Option<String>,
 }
 
+/// Per-address summary, served at `GET /v1/addresses/{addr}`.
+///
+/// Balances come from the chain proxy at handler time (sov-bank's
+/// `/v1/modules/bank/tokens/{token_id}/balances/{address}` is the
+/// source of truth; the indexer doesn't mirror live balances because
+/// they can change in-slot via a tx the indexer hasn't yet ingested).
+/// Everything else comes from the indexer's denormalised
+/// `address_summaries` table.
+///
+/// `schemas_owned_count` and `attestor_member_count` ship as `0` in
+/// v0 because Phase D's schema / attestor-set ingest is blocked on
+/// ligate-chain#295 (chain doesn't emit typed AttestationEvents
+/// yet). Wire shape locked now so partners don't refactor when D
+/// lands.
+#[derive(Debug, Serialize)]
+pub struct AddressSummaryResponse {
+    /// Bech32m `lig1...` address, echoed back verbatim from the path
+    /// parameter.
+    pub address: String,
+    /// Balances per token. Empty when the address has never received
+    /// the gas token and no other tokens were transferred to it.
+    /// Each entry's `amount_nano` is a u128 decimal string per RFC
+    /// 0002.
+    pub balances: Vec<TokenBalanceResponse>,
+    /// Total txs the address participated in: `txs_sent + txs_received`.
+    /// Computed at read time so partners don't have to add them
+    /// themselves.
+    pub tx_count: u64,
+    /// First slot in which a tx involving this address landed.
+    /// `null` for an address with no observed activity yet.
+    pub first_seen: Option<SeenAtResponse>,
+    /// Most recent slot in which a tx involving this address landed.
+    /// `null` for an address with no observed activity yet.
+    pub last_seen: Option<SeenAtResponse>,
+    /// Number of registered schemas where this address is `owner`.
+    /// Maintained by the (Phase D) schema ingest; `0` until that
+    /// lands.
+    pub schemas_owned_count: u32,
+    /// Number of attestor sets where this address's pubkey is a
+    /// member. Maintained by the (Phase D) attestor-set ingest; `0`
+    /// until that lands.
+    pub attestor_member_count: u32,
+}
+
+/// One token balance row inside [`AddressSummaryResponse.balances`].
+#[derive(Debug, Serialize)]
+pub struct TokenBalanceResponse {
+    /// Bech32m `token_1...` form.
+    pub token_id: String,
+    /// u128 as decimal string per RFC 0002.
+    pub amount_nano: String,
+}
+
+/// Provenance for first / last seen on an address. Sub-shape of
+/// [`AddressSummaryResponse`].
+#[derive(Debug, Serialize)]
+pub struct SeenAtResponse {
+    pub block_height: u64,
+    pub timestamp: String,
+}
+
 /// Generic cursor pagination envelope, per RFC 0001.
 ///
 /// Every list endpoint wraps its result rows in this shape. The

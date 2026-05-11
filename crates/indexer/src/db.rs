@@ -194,6 +194,103 @@ pub async fn insert_transaction(
     Ok(())
 }
 
+/// Update the `address_summaries` row for one address role in one tx.
+///
+/// Roles:
+///
+/// - `AddressRole::Sender` increments `txs_sent_count`. Called for
+///   every tx insert where `sender` is non-null.
+/// - `AddressRole::Receiver` increments `txs_received_count`. Called
+///   for `IndexerTx::Transfer` where `details.to` is the address.
+///
+/// `first_seen` is set on the first observation; `last_seen` updates
+/// monotonically when (slot, tx_hash) is more recent than the
+/// existing value. Concurrent-ingest-safe via `ON CONFLICT DO UPDATE`
+/// with greatest-wins semantics for `last_seen`.
+///
+/// `schemas_owned_count` and `attestor_member_count` are left at
+/// their existing values here; those counters are maintained by the
+/// schema / attestor-set ingest paths (Phase D), which haven't landed
+/// yet because the chain doesn't emit typed events for them (see
+/// ligate-chain#295). Reads always succeed; the count fields just
+/// stay 0 until Phase D wires their increments.
+pub async fn upsert_address_activity(
+    pool: &PgPool,
+    address: &str,
+    role: AddressRole,
+    slot_height: u64,
+    tx_hash: &str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let (sent_inc, recv_inc) = match role {
+        AddressRole::Sender => (1, 0),
+        AddressRole::Receiver => (0, 1),
+    };
+
+    sqlx::query(
+        "INSERT INTO address_summaries (
+            address,
+            txs_sent_count, txs_received_count,
+            first_seen_slot, first_seen_tx, first_seen_timestamp,
+            last_seen_slot,  last_seen_tx,  last_seen_timestamp
+         ) VALUES (
+            $1,
+            $2, $3,
+            $4, $5, $6,
+            $4, $5, $6
+         )
+         ON CONFLICT (address) DO UPDATE SET
+            txs_sent_count       = address_summaries.txs_sent_count + EXCLUDED.txs_sent_count,
+            txs_received_count   = address_summaries.txs_received_count + EXCLUDED.txs_received_count,
+            -- first_seen is sticky: keep whichever was earliest.
+            first_seen_slot      = LEAST(address_summaries.first_seen_slot, EXCLUDED.first_seen_slot),
+            first_seen_tx        = CASE
+                                     WHEN address_summaries.first_seen_slot IS NULL
+                                       OR EXCLUDED.first_seen_slot < address_summaries.first_seen_slot
+                                     THEN EXCLUDED.first_seen_tx
+                                     ELSE address_summaries.first_seen_tx
+                                   END,
+            first_seen_timestamp = CASE
+                                     WHEN address_summaries.first_seen_timestamp IS NULL
+                                       OR EXCLUDED.first_seen_timestamp < address_summaries.first_seen_timestamp
+                                     THEN EXCLUDED.first_seen_timestamp
+                                     ELSE address_summaries.first_seen_timestamp
+                                   END,
+            -- last_seen advances: keep whichever was later.
+            last_seen_slot       = GREATEST(address_summaries.last_seen_slot, EXCLUDED.last_seen_slot),
+            last_seen_tx         = CASE
+                                     WHEN address_summaries.last_seen_slot IS NULL
+                                       OR EXCLUDED.last_seen_slot > address_summaries.last_seen_slot
+                                     THEN EXCLUDED.last_seen_tx
+                                     ELSE address_summaries.last_seen_tx
+                                   END,
+            last_seen_timestamp  = CASE
+                                     WHEN address_summaries.last_seen_timestamp IS NULL
+                                       OR EXCLUDED.last_seen_timestamp > address_summaries.last_seen_timestamp
+                                     THEN EXCLUDED.last_seen_timestamp
+                                     ELSE address_summaries.last_seen_timestamp
+                                   END,
+            indexed_at           = NOW()",
+    )
+    .bind(address)
+    .bind(sent_inc)
+    .bind(recv_inc)
+    .bind(slot_height as i64)
+    .bind(tx_hash)
+    .bind(timestamp)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Which side of the tx the address played. Drives which counter
+/// gets incremented in [`upsert_address_activity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressRole {
+    Sender,
+    Receiver,
+}
+
 /// Read the resume-cursor: highest slot height we've already indexed.
 /// Returns `None` on a fresh database.
 pub async fn read_last_indexed_height(pool: &PgPool) -> Result<Option<u64>> {

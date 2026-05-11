@@ -17,14 +17,15 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, TimeZone, Utc};
 use ligate_api_types::{LedgerEvent, LedgerTx, SlotResponse};
 use sqlx::PgPool;
 use tracing::{debug, error, info, warn};
 
 use crate::client::NodeClient;
-use crate::db;
+use crate::db::{self, AddressRole};
 use crate::error::IndexerError;
-use crate::parser;
+use crate::parser::{self, IndexerTx};
 
 /// How long to wait between head-checks once we've caught up.
 const TAIL_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -177,6 +178,16 @@ async fn ingest_slot_transactions(
         return Ok(());
     };
 
+    // Slot timestamp for first_seen / last_seen denormalisation.
+    // SlotResponse carries it as Option<u64> (Unix seconds); fall
+    // back to UNIX_EPOCH so the field is never null at the address
+    // summary level (the `first_seen` / `last_seen` CHECK constraints
+    // are all-or-nothing).
+    let slot_timestamp: DateTime<Utc> = slot
+        .timestamp
+        .and_then(|s| Utc.timestamp_opt(s as i64, 0).single())
+        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
+
     // Fetch every event for this slot, grouped by `tx_hash`. One
     // network call serves the whole slot's classification, avoiding
     // a per-tx fetch on the events endpoint.
@@ -226,6 +237,19 @@ async fn ingest_slot_transactions(
                         slot = slot.number,
                         "inserting tx; continuing"
                     );
+                } else if let Err(e) =
+                    update_address_summaries(pool, &classified, slot.number, slot_timestamp).await
+                {
+                    // address_summaries is denormalised data; failure
+                    // here doesn't invalidate the tx row, just leaves
+                    // counters stale until a future re-index. Log and
+                    // continue rather than back the tx out.
+                    warn!(
+                        error = %e,
+                        tx_hash = %classified.hash,
+                        slot = slot.number,
+                        "updating address_summaries; counter is now stale"
+                    );
                 }
                 position_in_slot += 1;
             }
@@ -242,5 +266,45 @@ async fn ingest_slot_transactions(
         "slot tx ingest complete"
     );
 
+    Ok(())
+}
+
+/// Update `address_summaries` counters + first/last seen for both
+/// roles a tx exposes. Sender always, plus the recipient for transfers.
+///
+/// Independent of the tx insert (different table, no FK constraint).
+/// Called after `insert_transaction` succeeds. The chain's other tx
+/// kinds (`register_attestor_set` / `register_schema` /
+/// `submit_attestation`) will gain analogous handling here once
+/// Phase D's classifier extension lands (gated on ligate-chain#295).
+async fn update_address_summaries(
+    pool: &PgPool,
+    classified: &parser::ClassifiedTx,
+    slot_height: u64,
+    slot_timestamp: DateTime<Utc>,
+) -> Result<(), IndexerError> {
+    // Sender side. Some IndexerTx variants don't expose a sender
+    // (Unknown), in which case skip rather than back the tx out.
+    if let IndexerTx::Transfer(t) = &classified.kind {
+        db::upsert_address_activity(
+            pool,
+            &t.from,
+            AddressRole::Sender,
+            slot_height,
+            &classified.hash,
+            slot_timestamp,
+        )
+        .await?;
+        // Receiver side. Only Transfer has a meaningful recipient.
+        db::upsert_address_activity(
+            pool,
+            &t.to,
+            AddressRole::Receiver,
+            slot_height,
+            &classified.hash,
+            slot_timestamp,
+        )
+        .await?;
+    }
     Ok(())
 }
