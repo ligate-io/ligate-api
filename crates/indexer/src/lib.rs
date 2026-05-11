@@ -28,11 +28,13 @@ mod client;
 mod db;
 mod error;
 mod ingest;
+mod parser;
 
 pub use client::NodeClient;
 pub use db::connect;
 pub use error::IndexerError;
 pub use ingest::run as run_ingest;
+pub use parser::{classify_tx, outcome_of, ClassifiedTx, IndexerTransfer, IndexerTx, TxOutcome};
 pub use sqlx::PgPool;
 
 use anyhow::Result;

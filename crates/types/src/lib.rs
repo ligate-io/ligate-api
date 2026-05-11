@@ -214,6 +214,207 @@ pub struct TxResponse {
 }
 
 // ============================================================================
+// LedgerTx + LedgerEvent (typed mirrors of sov-api-spec OpenAPI)
+// ============================================================================
+//
+// Mirrors the `LedgerTx` / `LedgerEvent` schemas in the Sovereign SDK's
+// `sov-api-spec/openapi-v3.yaml`. Used by the indexer to walk slots ->
+// batches -> txs -> events while ingesting.
+//
+// Design choice: these types are STRICT (no `#[serde(flatten)] raw`)
+// because they're the indexer's contract with the chain. If the chain
+// adds a new required field, ingest fails loudly here and we update
+// the type in the same PR. Better than silently dropping data into a
+// catch-all and discovering it months later.
+//
+// One exception: `LedgerEvent.value` is intentionally `serde_json::Value`
+// because each module's event payload has a different shape; the
+// parser layer in `ligate-api-indexer` typed-decodes per-event-key.
+
+/// `GET /v1/ledger/txs/{txId}` body, strict-typed.
+///
+/// Note `body.data` is empty in current chain releases — the chain
+/// elides the tx body from JSON responses to avoid leaking unsigned
+/// internals on a public RPC. Indexers extract semantic info from the
+/// emitted [`LedgerEvent`]s, not from `body.data`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LedgerTx {
+    /// Always `"tx"` (Sovereign SDK's tagged-type discriminator).
+    #[serde(rename = "type")]
+    pub r#type: String,
+
+    /// Globally unique tx hash, lowercase hex with `0x` prefix.
+    pub hash: String,
+
+    /// Global tx index (NOT position-in-batch). Position-in-batch is
+    /// derivable as `number - batch.tx_range.start`.
+    pub number: u64,
+
+    /// Range of [`LedgerEvent.number`]s emitted by this tx. `start..end`
+    /// half-open. Empty range (`start == end`) for txs that emit no
+    /// events.
+    pub event_range: Uint64Range,
+
+    /// Tx body wrapper. `data` is base64 of the borsh-encoded signed-tx
+    /// bytes; `sequencing_data` is sequencer-supplied metadata. Both
+    /// are usually empty / null in current chain releases.
+    pub body: FullyBakedTx,
+
+    /// Outcome of the tx. `result` is `"successful" | "reverted" | "skipped"`.
+    pub receipt: TxReceipt,
+
+    /// Inline events (only populated when the chain returns them via
+    /// `?children=full` on a slot/batch fetch). Otherwise the indexer
+    /// fetches events separately at `/v1/ledger/slots/{n}/events`.
+    #[serde(default)]
+    pub events: Vec<LedgerEvent>,
+
+    /// Batch this tx landed in. Used to resolve `slot_number` via the
+    /// `/v1/ledger/batches/{batch_number}` lookup.
+    pub batch_number: u64,
+}
+
+/// Body wrapper inside [`LedgerTx`]. Both fields are usually empty
+/// strings in current chain releases (the chain elides the body from
+/// JSON for a public RPC).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FullyBakedTx {
+    /// Base64 of the borsh-encoded signed-tx bytes. Empty string when
+    /// the chain elides the body.
+    pub data: String,
+    /// Optional sequencer-supplied metadata in base64.
+    #[serde(default)]
+    pub sequencing_data: Option<String>,
+}
+
+/// Tx outcome wrapper. `result` is the discriminator partners switch on.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TxReceipt {
+    /// One of `"successful"`, `"reverted"`, `"skipped"`. RFC 0002 maps
+    /// these to `outcome = "committed" | "reverted" | <not-indexed>`
+    /// at the API layer.
+    pub result: String,
+    /// Generic per-result payload. For `"successful"`, contains
+    /// `gas_used: [u64, u64]`. For other results, varies.
+    pub data: Value,
+}
+
+/// Half-open `[start, end)` range of u64s. Used by `event_range`,
+/// `tx_range`, `batch_range` throughout the ledger surface.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Uint64Range {
+    /// Inclusive start.
+    pub start: u64,
+    /// Exclusive end.
+    pub end: u64,
+}
+
+/// One typed event emitted during tx execution.
+///
+/// Module-emitted events are the indexer's source of truth for tx
+/// semantics (since `LedgerTx.body.data` is empty in current chain
+/// releases). The shape of `value` is per-`key`; the indexer parser
+/// matches on `key` and decodes `value` accordingly.
+///
+/// Examples observed against localnet (chain `ligate-localnet`):
+///
+/// - `key = "Bank/TokenTransferred"`, `value = { token_transferred: { from, to, coins } }`
+/// - `key = "Attestation/AttestorSetRegistered"`, `value = { attestor_set_registered: { ... } }` (TODO: confirm shape on next localnet test)
+/// - `key = "Attestation/SchemaRegistered"`, `value = { schema_registered: { ... } }` (TODO)
+/// - `key = "Attestation/AttestationSubmitted"`, `value = { attestation_submitted: { ... } }` (TODO)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LedgerEvent {
+    /// Always `"event"`.
+    #[serde(rename = "type")]
+    pub r#type: String,
+
+    /// Globally unique event index.
+    pub number: u64,
+
+    /// Event key in the form `"<Module>/<EventName>"`. The parser
+    /// matches on this string to know which `value` shape to expect.
+    pub key: String,
+
+    /// Event payload. Per-event-key shape — the indexer's parser
+    /// typed-decodes via `serde_json::from_value(...)` against
+    /// per-event Rust structs.
+    pub value: Value,
+
+    /// Module reference. Always present; redundant with the prefix of
+    /// `key` but exposed by the chain for convenience.
+    pub module: ModuleRef,
+
+    /// Tx hash this event was emitted from. Lowercase hex with `0x`.
+    pub tx_hash: String,
+}
+
+/// Module reference inside [`LedgerEvent`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModuleRef {
+    /// Tagged-type discriminator. Always `"moduleRef"`.
+    #[serde(rename = "type", default)]
+    pub r#type: String,
+    /// Module name, e.g. `"Bank"` or `"Attestation"`.
+    pub name: String,
+}
+
+// ---- Per-event payload shapes (typed via serde_json::from_value) ----------
+//
+// One typed payload per `(module, event_name)` pair we ingest. The
+// indexer's parser switches on `LedgerEvent.key`, then deserialises
+// `LedgerEvent.value` into the matching struct.
+
+/// Payload of `Bank/TokenTransferred`.
+///
+/// Wire shape (captured from localnet tx
+/// `0x289cb5c1...` against chain `ligate-localnet`):
+///
+/// ```json
+/// {
+///   "token_transferred": {
+///     "from": { "user": "lig1..." },
+///     "to": { "user": "lig1..." },
+///     "coins": { "amount": "1000000000", "token_id": "token_1..." }
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BankTokenTransferredEvent {
+    /// Inner wrapper (Sovereign SDK's tagged-enum serialisation
+    /// produces `{ <variant_name>: <fields> }`).
+    pub token_transferred: BankTransferDetails,
+}
+
+/// Inner fields of a `Bank/TokenTransferred` event.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BankTransferDetails {
+    /// Sender, wrapped in the chain's `MultiAddress::User(addr)` shape.
+    pub from: MultiAddress,
+    /// Recipient.
+    pub to: MultiAddress,
+    /// Coins moved.
+    pub coins: Coins,
+}
+
+/// `MultiAddress` wrapper from the chain. The `user` variant is the
+/// only one observed on the public surface; module-internal variants
+/// are unwrapped before they hit events.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MultiAddress {
+    /// Bech32m `lig1...` address.
+    pub user: String,
+}
+
+/// `(amount, token_id)` pair as emitted by the bank module.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Coins {
+    /// Amount as a decimal string (chain uses u128, JS-compat).
+    pub amount: String,
+    /// Bech32m token id (`token_1...`).
+    pub token_id: String,
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
