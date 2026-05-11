@@ -47,6 +47,9 @@ chrono.workspace = true
 # Hex (for token id parsing during boot)
 hex.workspace = true
 
+# Base64url codec for opaque list-endpoint cursors (RFC 0001 pagination).
+base64.workspace = true
+
 # Sov-bank for TokenId during drip-state boot
 sov-bank        = { workspace = true }
 sov-modules-api = { workspace = true }

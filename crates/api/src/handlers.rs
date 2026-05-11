@@ -17,10 +17,21 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use chrono::SecondsFormat;
 use ligate_api_drip::{RateCheck, SignerError};
+use ligate_api_indexer::NodeClient;
 use serde::{Deserialize, Serialize};
 
+use crate::cursor;
+use crate::queries;
+use crate::responses::{BlockResponse, InfoResponse, Page, Pagination};
 use crate::AppState;
+
+/// Cursor shape for `/v1/blocks` (descending by slot height).
+#[derive(Debug, Serialize, Deserialize)]
+struct BlocksCursor {
+    slot: u64,
+}
 
 // ---- Operator probes -------------------------------------------------------
 
@@ -145,50 +156,197 @@ pub async fn drip(
     }))
 }
 
-// ---- Indexer query endpoints (v0 placeholders) -----------------------------
+// ---- Indexer query endpoints -----------------------------------------------
 //
-// The indexer's Postgres schema is still being shaped (slots only at
-// the moment; tx / schema / attestation tables come in subsequent PRs).
-// Until those land, these handlers return 501 NOT_IMPLEMENTED with a
-// pointer at the tracking issue. The explorer's Next.js frontend
-// renders mock data behind a `USE_MOCK_API=true` env var — flip to
-// `false` once a given endpoint is real.
+// Read directly from Postgres tables the indexer task keeps current.
+// Response shapes pinned by RFC 0002 (`docs/rfc/0002-response-shapes.md`);
+// pagination shapes pinned by RFC 0001. Endpoints not yet wired (txs,
+// schemas, addresses, attestor-sets) still return 501 with the
+// tracking-issue pointer below.
 
-/// Pagination shape used by every list endpoint. Currently inert
-/// because v0 indexer query handlers all return 501; the fields will
-/// drive Postgres `LIMIT` + cursor pagination once the queries land.
+/// Pagination query string shared by every list endpoint.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct PaginationParams {
     pub limit: Option<u32>,
     pub before: Option<String>,
 }
 
-pub async fn info(State(_state): State<AppState>) -> impl IntoResponse {
-    // Proxy to the chain's `/v1/rollup/info`. Wired in subsequent PR;
-    // v0 returns a placeholder so the explorer's `/info` route doesn't
-    // 500 in mock-API mode.
+/// `GET /v1/info` — chain identity + indexer head.
+///
+/// Proxies `GET /v1/rollup/info` from the chain, augments with the
+/// indexer's `MAX(height)` from Postgres. If either side fails, the
+/// fields that depend on it come back `null` rather than 502'ing the
+/// whole response — chain identity is independent of indexer health,
+/// and the explorer's "catching up" badge would rather render with
+/// partial data than show nothing.
+pub async fn info(State(state): State<AppState>) -> impl IntoResponse {
+    // Indexer head — local, fast, infallible enough to swallow errors.
+    let indexer_height = match queries::max_slot_height(&state.pg).await {
+        Ok(h) => h.map(|i| i as u64),
+        Err(e) => {
+            tracing::warn!(error = %e, "max_slot_height in /v1/info");
+            None
+        }
+    };
+
+    // Chain proxy — same RPC URL the indexer uses. Reusing the
+    // indexer's NodeClient keeps the URL-shaping consistent.
+    let chain_info = match NodeClient::new(&state.config.chain_rpc) {
+        Ok(client) => client.rollup_info().await.ok(),
+        Err(e) => {
+            tracing::warn!(error = %e, "building NodeClient in /v1/info");
+            None
+        }
+    };
+
+    let (chain_id, chain_hash, version, head_height) = match chain_info {
+        Some(info) => (
+            info.chain_id,
+            info.chain_hash,
+            info.version,
+            // The chain's `/v1/rollup/info` doesn't expose head
+            // height directly; the indexer task's bootstrap reads it
+            // via a separate `/v1/ledger/slots/latest` call. To keep
+            // this handler one-roundtrip, surface `head_height` as
+            // `indexer_height` for now — they're equal at the
+            // tail-poll cadence (which is the common case). A
+            // follow-up can split the two via a parallel proxy call
+            // if observable lag becomes a real symptom.
+            indexer_height,
+        ),
+        None => (String::new(), String::new(), String::new(), None),
+    };
+
+    let head_lag_slots = match (head_height, indexer_height) {
+        (Some(head), Some(at)) => Some(head.saturating_sub(at)),
+        _ => None,
+    };
+
+    Json(InfoResponse {
+        chain_id,
+        chain_hash,
+        version,
+        indexer_height,
+        head_height,
+        head_lag_slots,
+    })
+    .into_response()
+}
+
+/// `GET /v1/blocks` — descending list of slots with cursor pagination.
+///
+/// Reads from the `slots` table. Each row maps to a
+/// [`BlockResponse`] per RFC 0002 (height, hash, parent_hash,
+/// timestamp, tx_count, etc.). Cursor is opaque base64url-encoded
+/// JSON of the last row's slot height.
+pub async fn blocks_list(
+    State(state): State<AppState>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let limit = cursor::resolve_limit(params.limit);
+    let before_height: Option<i64> = params
+        .before
+        .as_deref()
+        .and_then(cursor::decode::<BlocksCursor>)
+        .map(|c| c.slot as i64);
+
+    // Fetch one extra to know whether a `next` cursor is warranted
+    // without a separate count query.
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows = match queries::slots_page(&state.pg, before_height, limit_plus_one).await {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(error = %e, "slots_page in /v1/blocks");
+            return internal_error();
+        }
+    };
+
+    let has_more = rows.len() as i64 > limit as i64;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+
+    let next = if has_more {
+        rows.last().and_then(|r| {
+            cursor::encode(&BlocksCursor {
+                slot: r.height as u64,
+            })
+            .ok()
+        })
+    } else {
+        None
+    };
+
+    let data: Vec<BlockResponse> = rows.into_iter().map(slot_to_block_response).collect();
+
+    Json(Page {
+        data,
+        pagination: Pagination { next, limit },
+    })
+    .into_response()
+}
+
+/// `GET /v1/blocks/{height}` — a single slot by height.
+///
+/// Returns 404 with the standard error envelope when the indexer
+/// hasn't written that height yet (either it's above the chain head,
+/// or the indexer is behind). Distinguishing those two cases needs a
+/// chain-side head query; for v0 the unified 404 is fine and matches
+/// the "indexer is the source of truth for this surface" framing.
+pub async fn block_by_height(
+    State(state): State<AppState>,
+    Path(height): Path<u64>,
+) -> impl IntoResponse {
+    let row = match queries::slot_by_height(&state.pg, height as i64).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "block not found",
+                    "tracking": null
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, height, "slot_by_height in /v1/blocks/{{height}}");
+            return internal_error();
+        }
+    };
+
+    Json(slot_to_block_response(row)).into_response()
+}
+
+/// Map a Postgres row from the `slots` table to the RFC 0002
+/// `Block` wire shape. Bridges the Postgres-side typing (i64
+/// heights, `chrono::DateTime<Utc>` timestamps) to the JSON
+/// representation (JSON number heights, RFC3339-millis timestamps).
+fn slot_to_block_response(row: queries::SlotRow) -> BlockResponse {
+    BlockResponse {
+        height: row.height as u64,
+        hash: row.hash,
+        parent_hash: row.prev_hash,
+        state_root: row.state_root,
+        timestamp: row.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
+        tx_count: row.tx_count,
+        batch_count: row.batch_count,
+        // Reserved — chain doesn't emit these in v0. See
+        // BlockResponse field docs for rationale.
+        proposer: None,
+        size_bytes: None,
+    }
+}
+
+fn internal_error() -> axum::response::Response {
     (
-        StatusCode::NOT_IMPLEMENTED,
+        StatusCode::INTERNAL_SERVER_ERROR,
         Json(serde_json::json!({
-            "error": "not implemented yet",
-            "tracking": "https://github.com/ligate-io/ligate-api/issues/1"
+            "error": "internal error",
+            "tracking": null
         })),
     )
-}
-
-pub async fn blocks_list(
-    State(_state): State<AppState>,
-    Query(_params): Query<PaginationParams>,
-) -> impl IntoResponse {
-    not_implemented("/v1/blocks list")
-}
-
-pub async fn block_by_height(
-    State(_state): State<AppState>,
-    Path(_height): Path<u64>,
-) -> impl IntoResponse {
-    not_implemented("/v1/blocks/{height}")
+        .into_response()
 }
 
 pub async fn txs_list(

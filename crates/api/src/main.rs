@@ -49,7 +49,10 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 mod config;
+mod cursor;
 mod handlers;
+mod queries;
+mod responses;
 
 use crate::config::Config;
 
@@ -62,9 +65,6 @@ pub(crate) struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     /// Postgres pool. Indexer task writes to this; query handlers read
     /// from it. Connection limits configured in `Config::pg_pool_size`.
-    /// `dead_code` until the v1 query handlers (blocks/txs/addresses/
-    /// schemas) start consuming it; the indexer task uses its own pool.
-    #[allow(dead_code)]
     pub pg: sqlx::PgPool,
 }
 

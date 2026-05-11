@@ -75,6 +75,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # Misc
 hex = "0.4"
 url = "2"
+base64 = "0.22"
 
 # Chain crates (git deps; pin via branch=main until chain ships a stable rev).
 ligate-client = { git = "https://github.com/ligate-io/ligate-chain.git", branch = "main", features = ["submit"] }
