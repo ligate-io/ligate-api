@@ -192,6 +192,12 @@ pub struct SlotResponse {
     /// Number of transactions across all batches in this slot.
     #[serde(default)]
     pub tx_count: Option<u64>,
+    /// Half-open range of batch numbers that landed in this slot.
+    /// Present in current chain responses (e.g. `batch_range: {start:
+    /// 7888, end: 7889}`); the indexer walks this to fetch each batch
+    /// in turn.
+    #[serde(default)]
+    pub batch_range: Option<Uint64Range>,
     /// Catch-all so unknown fields round-trip without loss.
     #[serde(flatten)]
     pub raw: std::collections::BTreeMap<String, Value>,
@@ -311,6 +317,33 @@ pub struct Uint64Range {
     pub start: u64,
     /// Exclusive end.
     pub end: u64,
+}
+
+/// `GET /v1/ledger/batches/{batchId}` body.
+///
+/// Each batch belongs to exactly one slot (via `slot_number`) and
+/// covers a contiguous half-open range of transactions (`tx_range`).
+/// The indexer walks `slot.batch_range`, fetches each batch, then
+/// walks the batch's `tx_range` to fetch individual txs.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LedgerBatch {
+    /// Always `"batch"` (Sovereign SDK's tagged-type discriminator).
+    #[serde(rename = "type")]
+    pub r#type: String,
+    /// Globally unique batch number.
+    pub number: u64,
+    /// Bech32m batch hash (`lba1...` on `ligate-chain@0ac7e5b` and
+    /// later; hex `0x...` on older chain revs). Opaque to the
+    /// indexer — passed verbatim into Postgres.
+    pub hash: String,
+    /// Slot this batch belongs to.
+    pub slot_number: u64,
+    /// Half-open range of tx numbers in this batch.
+    pub tx_range: Uint64Range,
+    /// Catch-all so unknown receipt / outcome fields round-trip
+    /// without losing data the typed shape doesn't model yet.
+    #[serde(flatten)]
+    pub raw: std::collections::BTreeMap<String, Value>,
 }
 
 /// One typed event emitted during tx execution.
