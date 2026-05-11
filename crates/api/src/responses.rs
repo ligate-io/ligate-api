@@ -92,6 +92,64 @@ pub struct BlockResponse {
     pub size_bytes: Option<u64>,
 }
 
+/// One transaction, served at `GET /v1/txs/{hash}` and as each
+/// element of the list at `GET /v1/txs`.
+///
+/// Per RFC 0002 §"Tx kinds": `kind` is a tagged-union discriminator;
+/// `details` shape varies by `kind`. We surface `details` as a
+/// pass-through JSON value rather than a typed enum, mirroring the
+/// indexer's `transactions.details` JSONB column. Clients dispatch on
+/// `kind` and decode `details` accordingly (see `ligate-js` for the
+/// typed mapping).
+///
+/// `sender_pubkey`, `nonce`, and `fee_paid_nano` are nullable because
+/// the chain elides borsh-encoded tx bodies from REST (see migration
+/// 0003); the indexer fills `sender` from event payloads but leaves
+/// the elided fields `null`. RFC 0002's "always present, null if
+/// absent" rule applies — clients see the field name, just not data.
+#[derive(Debug, Serialize)]
+pub struct TxResponse {
+    /// Transaction hash. Bech32m `ltx1...` on `ligate-chain@0ac7e5b`
+    /// and later; hex `0x...` on older chain revs.
+    pub hash: String,
+    /// Slot height this tx landed in. Joins to `/v1/blocks/{height}`.
+    pub block_height: u64,
+    /// Block hash for the slot. May echo the slot's `lblk1...` form
+    /// once chain emits that, or hex on legacy revs.
+    pub block_hash: Option<String>,
+    /// RFC3339 millisecond-precision timestamp of the slot. `null`
+    /// only if the join to `slots` somehow missed (shouldn't happen
+    /// for finalised slots; the indexer writes slots before txs).
+    pub block_timestamp: Option<String>,
+    /// Index of the tx within its block. Stable across reads; comes
+    /// from the chain's per-slot ordering.
+    pub position: i32,
+    /// Sender address (`lig1...`) derived from `pubkey[..28]`. `null`
+    /// if no recognised event in the tx exposed the sender (only
+    /// `Bank/TokenTransferred` does today).
+    pub sender: Option<String>,
+    /// Sender pubkey (`lpk1...`). `null` in v0 — chain elides the
+    /// pubkey from REST; reserved for when it becomes available.
+    pub sender_pubkey: Option<String>,
+    /// Account nonce. `null` in v0 — same reason as `sender_pubkey`.
+    pub nonce: Option<i64>,
+    /// Fee paid in nano-LGT (u128 as decimal string per RFC 0002).
+    /// `null` in v0 — chain elides fee envelope.
+    pub fee_paid_nano: Option<String>,
+    /// Tagged-union discriminator. Values per RFC 0002 §"Tx kinds":
+    /// `"transfer" | "register_attestor_set" | "register_schema" |
+    /// "submit_attestation" | "unknown"`.
+    pub kind: String,
+    /// Per-`kind` payload. Shape pinned by RFC 0002. Pass-through
+    /// from the indexer's `transactions.details` JSONB column.
+    pub details: serde_json::Value,
+    /// `"committed"` or `"reverted"`. Skipped txs aren't indexed.
+    pub outcome: String,
+    /// Free-form reverter reason when `outcome == "reverted"`. Chain
+    /// doesn't currently emit this for tx-level reverts; `null` in v0.
+    pub revert_reason: Option<String>,
+}
+
 /// Generic cursor pagination envelope, per RFC 0001.
 ///
 /// Every list endpoint wraps its result rows in this shape. The

@@ -12,6 +12,7 @@
 //! "RFC3339 with milliseconds", "u128 as decimal string", etc. live.
 
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use sqlx::PgPool;
 
 /// One row of the `slots` table, mapped to a Rust shape. Mirrors the
@@ -153,4 +154,211 @@ pub async fn slots_page(
             },
         )
         .collect())
+}
+
+// ---- transactions ----------------------------------------------------------
+//
+// The `transactions` table is the indexer ingest target — see
+// `crates/indexer/src/db.rs::insert_transaction`. These reads join
+// against `slots` so a single query returns the block-side fields
+// (`block_hash`, `block_timestamp`) the wire shape needs without a
+// follow-up roundtrip.
+
+/// One row of the `transactions ⨝ slots` join, mapped to a Rust
+/// shape. The handler converts this to [`crate::responses::TxResponse`].
+#[derive(Debug)]
+pub struct TxRow {
+    pub hash: String,
+    pub slot: i64,
+    pub position: i32,
+    pub sender: Option<String>,
+    pub sender_pubkey: Option<String>,
+    pub nonce: Option<i64>,
+    /// Postgres `NUMERIC(78,0)` exposed as `String` via `bigdecimal`.
+    /// RFC 0002 wants decimal-string at the wire boundary, so we
+    /// surface it as `String` here rather than parsing through a
+    /// numeric type that loses precision.
+    pub fee_paid_nano: Option<String>,
+    pub kind: String,
+    pub details: Value,
+    pub outcome: String,
+    pub revert_reason: Option<String>,
+    pub block_hash: Option<String>,
+    pub block_timestamp: Option<DateTime<Utc>>,
+}
+
+/// Read one tx by hash. `None` if the indexer hasn't written that
+/// hash yet — either it's pre-finality on the chain or the tx
+/// doesn't exist.
+pub async fn tx_by_hash(pool: &PgPool, hash: &str) -> sqlx::Result<Option<TxRow>> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            i64,
+            i32,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<sqlx::types::BigDecimal>,
+            String,
+            Value,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<DateTime<Utc>>,
+        ),
+    >(
+        "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
+                t.fee_paid_nano, t.kind, t.details, t.outcome, t.revert_reason,
+                s.hash, s.timestamp
+         FROM transactions t
+         JOIN slots s ON s.height = t.slot
+         WHERE t.hash = $1",
+    )
+    .bind(hash)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(tx_row_from_tuple))
+}
+
+/// Cursor shape for `/v1/txs`. Compound (slot desc, position desc)
+/// to give a strict-decreasing key for a stable order across reads,
+/// even when the indexer is inserting concurrently.
+pub struct TxsCursor {
+    pub slot: i64,
+    pub position: i32,
+}
+
+/// Read a page of txs, descending by (slot, position). `before` is
+/// the cursor; `None` starts at the head. Fetches `limit + 1` rows
+/// for has-more detection (same trick as `slots_page`).
+pub async fn txs_page(
+    pool: &PgPool,
+    before: Option<TxsCursor>,
+    limit_plus_one: i64,
+) -> sqlx::Result<Vec<TxRow>> {
+    let rows = match before {
+        Some(c) => {
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    i64,
+                    i32,
+                    Option<String>,
+                    Option<String>,
+                    Option<i64>,
+                    Option<sqlx::types::BigDecimal>,
+                    String,
+                    Value,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<DateTime<Utc>>,
+                ),
+            >(
+                "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
+                        t.fee_paid_nano, t.kind, t.details, t.outcome, t.revert_reason,
+                        s.hash, s.timestamp
+                 FROM transactions t
+                 JOIN slots s ON s.height = t.slot
+                 WHERE (t.slot, t.position) < ($1, $2)
+                 ORDER BY t.slot DESC, t.position DESC
+                 LIMIT $3",
+            )
+            .bind(c.slot)
+            .bind(c.position)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    i64,
+                    i32,
+                    Option<String>,
+                    Option<String>,
+                    Option<i64>,
+                    Option<sqlx::types::BigDecimal>,
+                    String,
+                    Value,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<DateTime<Utc>>,
+                ),
+            >(
+                "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
+                        t.fee_paid_nano, t.kind, t.details, t.outcome, t.revert_reason,
+                        s.hash, s.timestamp
+                 FROM transactions t
+                 JOIN slots s ON s.height = t.slot
+                 ORDER BY t.slot DESC, t.position DESC
+                 LIMIT $1",
+            )
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    Ok(rows.into_iter().map(tx_row_from_tuple).collect())
+}
+
+#[allow(clippy::type_complexity)]
+fn tx_row_from_tuple(
+    t: (
+        String,
+        i64,
+        i32,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<sqlx::types::BigDecimal>,
+        String,
+        Value,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<DateTime<Utc>>,
+    ),
+) -> TxRow {
+    let (
+        hash,
+        slot,
+        position,
+        sender,
+        sender_pubkey,
+        nonce,
+        fee_paid_nano,
+        kind,
+        details,
+        outcome,
+        revert_reason,
+        block_hash,
+        block_timestamp,
+    ) = t;
+    TxRow {
+        hash,
+        slot,
+        position,
+        sender,
+        sender_pubkey,
+        nonce,
+        // BigDecimal → String. Trimmed of trailing decimal noise so
+        // a `1000000000` row comes back as `"1000000000"`, not
+        // `"1000000000.0"` (BigDecimal's default Display).
+        fee_paid_nano: fee_paid_nano.map(|bd| bd.with_scale(0).to_string()),
+        kind,
+        details,
+        outcome,
+        revert_reason,
+        block_hash,
+        block_timestamp,
+    }
 }

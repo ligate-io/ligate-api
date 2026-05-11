@@ -24,13 +24,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::cursor;
 use crate::queries;
-use crate::responses::{BlockResponse, InfoResponse, Page, Pagination};
+use crate::responses::{BlockResponse, InfoResponse, Page, Pagination, TxResponse};
 use crate::AppState;
 
 /// Cursor shape for `/v1/blocks` (descending by slot height).
 #[derive(Debug, Serialize, Deserialize)]
 struct BlocksCursor {
     slot: u64,
+}
+
+/// Cursor shape for `/v1/txs` (compound: descending by (slot, idx)).
+/// `idx` matches the `transactions.position` column on the read side.
+#[derive(Debug, Serialize, Deserialize)]
+struct TxsCursor {
+    slot: u64,
+    idx: u32,
 }
 
 // ---- Operator probes -------------------------------------------------------
@@ -349,18 +357,110 @@ fn internal_error() -> axum::response::Response {
         .into_response()
 }
 
+/// `GET /v1/txs` — descending list of indexed transactions with
+/// compound cursor pagination.
+///
+/// Reads from `transactions ⨝ slots`, ordered by `(slot DESC,
+/// position DESC)`. Cursor encodes the last row's `(slot, idx)`.
 pub async fn txs_list(
-    State(_state): State<AppState>,
-    Query(_params): Query<PaginationParams>,
+    State(state): State<AppState>,
+    Query(params): Query<PaginationParams>,
 ) -> impl IntoResponse {
-    not_implemented("/v1/txs list")
+    let limit = cursor::resolve_limit(params.limit);
+    let before = params
+        .before
+        .as_deref()
+        .and_then(cursor::decode::<TxsCursor>)
+        .map(|c| queries::TxsCursor {
+            slot: c.slot as i64,
+            position: c.idx as i32,
+        });
+
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows = match queries::txs_page(&state.pg, before, limit_plus_one).await {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(error = %e, "txs_page in /v1/txs");
+            return internal_error();
+        }
+    };
+
+    let has_more = rows.len() as i64 > limit as i64;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+
+    let next = if has_more {
+        rows.last().and_then(|r| {
+            cursor::encode(&TxsCursor {
+                slot: r.slot as u64,
+                idx: r.position as u32,
+            })
+            .ok()
+        })
+    } else {
+        None
+    };
+
+    let data: Vec<TxResponse> = rows.into_iter().map(tx_row_to_response).collect();
+
+    Json(Page {
+        data,
+        pagination: Pagination { next, limit },
+    })
+    .into_response()
 }
 
+/// `GET /v1/txs/{hash}` — a single tx by hash.
+///
+/// 404 when the indexer hasn't written the hash. The chain may have
+/// emitted it pre-finality, the partner may have a typo, or the tx
+/// genuinely doesn't exist; we don't try to distinguish.
 pub async fn tx_by_hash(
-    State(_state): State<AppState>,
-    Path(_hash): Path<String>,
+    State(state): State<AppState>,
+    Path(hash): Path<String>,
 ) -> impl IntoResponse {
-    not_implemented("/v1/txs/{hash}")
+    let row = match queries::tx_by_hash(&state.pg, &hash).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "tx not found",
+                    "tracking": null
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, %hash, "tx_by_hash in /v1/txs/{{hash}}");
+            return internal_error();
+        }
+    };
+
+    Json(tx_row_to_response(row)).into_response()
+}
+
+/// Map a Postgres row from the `transactions ⨝ slots` join to the
+/// RFC 0002 `Tx` wire shape.
+fn tx_row_to_response(row: queries::TxRow) -> TxResponse {
+    TxResponse {
+        hash: row.hash,
+        block_height: row.slot as u64,
+        block_hash: row.block_hash,
+        block_timestamp: row
+            .block_timestamp
+            .map(|t| t.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        position: row.position,
+        sender: row.sender,
+        sender_pubkey: row.sender_pubkey,
+        nonce: row.nonce,
+        fee_paid_nano: row.fee_paid_nano,
+        kind: row.kind,
+        details: row.details,
+        outcome: row.outcome,
+        revert_reason: row.revert_reason,
+    }
 }
 
 pub async fn address_summary(
