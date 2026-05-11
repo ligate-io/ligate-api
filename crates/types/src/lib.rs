@@ -373,7 +373,9 @@ pub struct ModuleRef {
 /// Payload of `Bank/TokenTransferred`.
 ///
 /// Wire shape (captured from localnet tx
-/// `0x289cb5c1...` against chain `ligate-localnet`):
+/// `ltx19zwttsdksue0ef4fan7lnfhcjdq9lq8d592hjpcc30gh5c77ytzqvjmjm4`
+/// against chain `ligate-localnet`; pre-bech32m chain revs returned
+/// the same payload byte-identical, just with `0x...` hex hashes):
 ///
 /// ```json
 /// {
@@ -474,8 +476,8 @@ mod tests {
     fn slot_response_preserves_unknown_fields() {
         let body = r#"{
             "number": 42,
-            "hash": "0xabc",
-            "prev_hash": "0xdef",
+            "hash": "lblk1abc",
+            "prev_hash": "lblk1def",
             "timestamp": 1700000000,
             "future_field": "future_value"
         }"#;

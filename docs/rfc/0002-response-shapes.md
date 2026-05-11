@@ -42,7 +42,12 @@ cheaper than refactoring three repos. Specifically:
 | u64 / i64 | JSON number | Fits in f64 for values up to 2^53 |
 | Timestamps | RFC3339 with milliseconds (`"2026-05-09T01:23:45.678Z"`) | Human-readable + parser-stable |
 | Block height / slot | JSON number (u64 fits) | `"slot": 12345` |
-| Tx hash | Hex string with `0x` prefix | `"hash": "0xdeadbeef..."` |
+| Tx hash | bech32m `ltx1...` | `"hash": "ltx1..."`; chain accepts `0x...` hex on URL paths for backward compat |
+| Block / slot hash | bech32m `lblk1...` | `"hash": "lblk1..."`; chain accepts hex on input |
+| State root | bech32m `lsr1...` | 64-byte payload (NOMT storage backend) |
+| Batch hash | bech32m `lba1...` | Canonical |
+| DA blob hash | bech32m `lbz1...` | Surfaced in operator logs + sequencer receipts |
+| Chain hash | bech32m `lsch1...` | Wallet/schema commitment; returned by `/v1/info` and `/v1/rollup/schema` |
 | Address | bech32m `lig1...` | Canonical, no hex variants |
 | Schema id | bech32m `lsc1...` | Canonical |
 | Attestor set id | bech32m `las1...` | Canonical |
@@ -67,7 +72,7 @@ comparisons can `===` two ids without a normalisation step.
 ```jsonc
 {
   "chain_id": "ligate-devnet-1",          // string, from chain config
-  "chain_hash": "eec077f4...",            // hex, 64 chars, no 0x
+  "chain_hash": "lsch1amq80arndh6...",    // bech32m with HRP `lsch`
   "version": "0.1.0-devnet",              // node binary semver
   "indexer_height": 12345,                // last slot the indexer has fully ingested
   "head_height": 12345,                   // last slot the chain has finalised (could be > indexer_height during catch-up)
@@ -84,8 +89,8 @@ indexer fields.
 ```jsonc
 {
   "height": 12345,
-  "hash": "0xabc...",                      // 32-byte block hash
-  "parent_hash": "0x...",
+  "hash": "lblk1...",                      // 32-byte block hash, bech32m HRP `lblk`
+  "parent_hash": "lblk1...",
   "timestamp": "2026-05-09T01:23:45.678Z",
   "tx_count": 7,
   "proposer": "lig1...",                   // sequencer address that proposed the block
@@ -101,9 +106,9 @@ need a join. Detailed tx list lives at `/v1/blocks/{height}/txs`
 
 ```jsonc
 {
-  "hash": "0xdead...",
+  "hash": "ltx1...",
   "block_height": 12345,
-  "block_hash": "0xabc...",
+  "block_hash": "lblk1...",
   "block_timestamp": "2026-05-09T01:23:45.678Z",
   "position": 0,                           // index within the block
   "sender": "lig1...",                     // address derived from pubkey[..28]
@@ -148,7 +153,7 @@ ship indexer updates async with chain upgrades.
   "payload_shape_hash": "0xhex...",
   "registered_at": {
     "block_height": 12345,
-    "tx_hash": "0xdead...",
+    "tx_hash": "ltx1...",
     "timestamp": "2026-05-09T01:23:45.678Z"
   },
   "attestation_count": 1234              // running total, denormalised
@@ -164,7 +169,7 @@ ship indexer updates async with chain upgrades.
   "threshold": 3,
   "registered_at": {
     "block_height": 12345,
-    "tx_hash": "0xdead...",
+    "tx_hash": "ltx1...",
     "timestamp": "2026-05-09T01:23:45.678Z"
   },
   "schema_count": 5                      // schemas bound to this set; denormalised
