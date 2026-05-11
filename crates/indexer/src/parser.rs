@@ -123,7 +123,9 @@ pub fn classify_tx(tx: &LedgerTx, events: &[&LedgerEvent]) -> Option<ClassifiedT
 /// One classified tx, ready for [`crate::db`] insertion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedTx {
-    /// Lowercase hex with `0x` prefix.
+    /// Tx hash as the chain serialised it. Bech32m `ltx1...` on
+    /// `ligate-chain` `0ac7e5b` and later; hex `0x...` on older chain
+    /// revs. The parser doesn't validate the format.
     pub hash: String,
     /// `LedgerTx.batch_number`. Resolves to slot via the
     /// `/v1/ledger/batches/{n}` lookup.
@@ -178,7 +180,7 @@ mod tests {
     fn fixture_tx(receipt_result: &str) -> LedgerTx {
         LedgerTx {
             r#type: "tx".into(),
-            hash: "0xdeadbeef".into(),
+            hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(), // synthetic bech32m fixture, format-opaque to parser
             number: 1,
             event_range: Uint64Range { start: 1, end: 2 },
             body: FullyBakedTx {
@@ -214,7 +216,7 @@ mod tests {
     fn classify_recognises_token_transferred() {
         // Wire shape captured from a localnet tx — kept as-is so the
         // test pins what we observed against ligate-localnet (chain
-        // ligate-localnet, slot 8975, tx_hash 0x289c...).
+        // ligate-localnet, slot 8975, tx_hash `ltx1...` (chain-localnet, slot 8975)).
         let event_value = serde_json::json!({
             "token_transferred": {
                 "from": { "user": "lig132yw8ht5p8cetl2jmvknewjawt9xwzdlrk2pyxlnwjyqz3m499u" },
@@ -234,7 +236,7 @@ mod tests {
                 r#type: "moduleRef".into(),
                 name: "Bank".into(),
             },
-            tx_hash: "0xdeadbeef".into(),
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(), // synthetic bech32m fixture, format-opaque to parser
         };
         let tx = fixture_tx("successful");
         let classified = classify_tx(&tx, &[&event]).expect("not skipped");
@@ -270,7 +272,7 @@ mod tests {
                 r#type: "moduleRef".into(),
                 name: "Attestation".into(),
             },
-            tx_hash: "0xdeadbeef".into(),
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(), // synthetic bech32m fixture, format-opaque to parser
         };
         let tx = fixture_tx("successful");
         let classified = classify_tx(&tx, &[&event]).expect("not skipped");

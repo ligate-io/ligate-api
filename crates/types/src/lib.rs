@@ -243,7 +243,11 @@ pub struct LedgerTx {
     #[serde(rename = "type")]
     pub r#type: String,
 
-    /// Globally unique tx hash, lowercase hex with `0x` prefix.
+    /// Globally unique tx hash. Bech32m-encoded with HRP `ltx`
+    /// (`ltx1...`) as of `ligate-chain` `0ac7e5b` and later;
+    /// pre-bech32m chain revs returned lowercase hex with `0x` prefix.
+    /// The indexer treats this opaquely: no format validation, just
+    /// pass-through into Postgres.
     pub hash: String,
 
     /// Global tx index (NOT position-in-batch). Position-in-batch is
@@ -344,7 +348,9 @@ pub struct LedgerEvent {
     /// `key` but exposed by the chain for convenience.
     pub module: ModuleRef,
 
-    /// Tx hash this event was emitted from. Lowercase hex with `0x`.
+    /// Tx hash this event was emitted from. Same format as
+    /// [`LedgerTx::hash`]: bech32m `ltx1...` on current chain, hex
+    /// `0x...` on pre-bech32m chain revs. Treated opaquely.
     pub tx_hash: String,
 }
 
@@ -367,7 +373,9 @@ pub struct ModuleRef {
 /// Payload of `Bank/TokenTransferred`.
 ///
 /// Wire shape (captured from localnet tx
-/// `0x289cb5c1...` against chain `ligate-localnet`):
+/// `ltx19zwttsdksue0ef4fan7lnfhcjdq9lq8d592hjpcc30gh5c77ytzqvjmjm4`
+/// against chain `ligate-localnet`; pre-bech32m chain revs returned
+/// the same payload byte-identical, just with `0x...` hex hashes):
 ///
 /// ```json
 /// {
@@ -468,8 +476,8 @@ mod tests {
     fn slot_response_preserves_unknown_fields() {
         let body = r#"{
             "number": 42,
-            "hash": "0xabc",
-            "prev_hash": "0xdef",
+            "hash": "lblk1abc",
+            "prev_hash": "lblk1def",
             "timestamp": 1700000000,
             "future_field": "future_value"
         }"#;

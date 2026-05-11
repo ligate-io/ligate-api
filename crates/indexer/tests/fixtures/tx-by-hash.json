@@ -1,1 +1,1 @@
-{"type":"tx","number":1,"hash":"0x289cb5c1b68732fca6a9ecfdf9a6f893405f80eda1557907188bd17a63de22c4","event_range":{"start":1,"end":2},"body":{"data":"","sequencing_data":null},"receipt":{"result":"successful","data":{"gas_used":[16806,16806]}},"batch_number":8929}
+{"type":"tx","number":1,"hash":"ltx19zwttsdksue0ef4fan7lnfhcjdq9lq8d592hjpcc30gh5c77ytzqvjmjm4","event_range":{"start":1,"end":2},"body":{"data":"","sequencing_data":null},"receipt":{"result":"successful","data":{"gas_used":[16806,16806]}},"batch_number":8929}

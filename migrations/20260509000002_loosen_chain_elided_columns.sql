@@ -5,8 +5,10 @@
 -- Migration 0002 declared `sender_pubkey`, `nonce`, and `fee_paid_nano`
 -- as `NOT NULL` on the `transactions` table, on the assumption that
 -- the chain would expose them in tx JSON. After verifying against a
--- live localnet (chain `ligate-localnet`, slot 8975, tx_hash
--- 0x289c...), we now know:
+-- live localnet (chain `ligate-localnet`, slot 8975, original capture
+-- pre-dated the bech32m chain output; today the same tx would be
+-- `ltx19zwttsdksue0ef4fan7lnfhcjdq9lq8d592hjpcc30gh5c77ytzqvjmjm4`),
+-- we now know:
 --
 --   • `LedgerTx.body.data` is the empty string `""` in chain JSON
 --     responses (the chain elides borsh-encoded body bytes from the

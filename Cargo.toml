@@ -82,9 +82,60 @@ ligate-stf    = { git = "https://github.com/ligate-io/ligate-chain.git", branch 
 ligate-rollup = { git = "https://github.com/ligate-io/ligate-chain.git", branch = "main" }
 attestation   = { git = "https://github.com/ligate-io/ligate-chain.git", branch = "main", features = ["native"] }
 
-# Sovereign SDK pieces we directly construct.
+# Sovereign SDK pieces we directly construct. Pinned at upstream
+# `f89964c66`; redirected to our fork by the `[patch]` block at the
+# bottom of this file. The `[patch]` block is the single source of
+# truth for which SDK rev ligate-api compiles against.
 sov-bank        = { git = "https://github.com/Sovereign-Labs/sovereign-sdk.git", rev = "f89964c66bcfb6a31712e43278378b54c33d3779", features = ["native"] }
 sov-modules-api = { git = "https://github.com/Sovereign-Labs/sovereign-sdk.git", rev = "f89964c66bcfb6a31712e43278378b54c33d3779", features = ["native"] }
+
+# Redirect every Sovereign-Labs/sovereign-sdk dep to our fork on
+# `ligate-mainline`. Mirrors the same block in
+# `ligate-chain/Cargo.toml` so chain crates we consume (`ligate-stf`,
+# `ligate-rollup`, `ligate-client`) and their transitives all resolve
+# to the same SDK code the chain itself was compiled against.
+#
+# `[patch]` blocks don't transit across workspaces — consuming the
+# chain via git dep alone doesn't pick up the chain's patch overrides.
+# ligate-api needs its own mirror block, kept in lockstep with the
+# chain's via the same fork rev.
+#
+# When bumping the chain pin, also bump the fork rev here. The chain's
+# CONTRIBUTING.ligate.md documents the rebase / rev-bump workflow on
+# the fork side.
+[patch."https://github.com/Sovereign-Labs/sovereign-sdk.git"]
+sov-accounts                   = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-address                    = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-api-spec                   = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-attester-incentives        = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-bank                       = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-blob-sender                = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-blob-storage               = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-build                      = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-capabilities               = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-celestia-adapter           = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-chain-state                = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-db                         = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-kernels                    = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-mock-da                    = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-mock-zkvm                  = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-modules-api                = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-modules-rollup-blueprint   = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-modules-stf-blueprint      = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-node-client                = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-operator-incentives        = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-prover-incentives          = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-risc0-adapter              = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-rollup-apis                = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-rollup-full-node-interface = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-rollup-interface           = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-sequencer                  = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-sequencer-registry         = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-state                      = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-stf-runner                 = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-test-utils                 = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-uniqueness                 = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
+sov-zkvm-utils                 = { git = "https://github.com/ligate-io/sovereign-sdk.git", rev = "572cada6c6c84ef8d90baef451484a2161bdb85c" }
 
 [profile.release]
 opt-level = 3
