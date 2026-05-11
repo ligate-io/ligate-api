@@ -23,8 +23,10 @@ ligate-api-drip    = { path = "crates/drip", version = "0.0.1" }
 ligate-api-indexer = { path = "crates/indexer", version = "0.0.1" }
 ligate-api-types   = { path = "crates/types", version = "0.0.1" }
 
-# HTTP server
-axum = "0.7"
+# HTTP server. axum 0.8 to match what chain crates pull in (avoids a
+# duplicate axum in the dep tree) and to use the `{name}` path-param
+# syntax the handlers were already written against.
+axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
