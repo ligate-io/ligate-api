@@ -37,9 +37,23 @@ pub struct DripRequest {
 
 #[derive(Debug, Serialize)]
 pub struct DripResponse {
+    /// Bech32m `lig1...` address that was funded (echoed back verbatim
+    /// from the `DripRequest.address` field).
     pub address: String,
+    /// Transaction hash from the chain's submit endpoint. Bech32m with
+    /// HRP `ltx` (`ltx1...`) as of `ligate-chain@0ac7e5b`; previously
+    /// raw hex. The faucet forwards whatever the chain's tx-hash
+    /// `Display` impl returns at runtime, so the format follows
+    /// whichever chain rev the faucet is pointed at without code
+    /// changes.
     pub tx_hash: String,
+    /// Amount dripped, in nano-LGT (u128 fits in JSON number for the
+    /// `1e9 * default_drip` values we use). Decimal-string preferred
+    /// over numbers per RFC 0002 for amounts >2^53, but the drip
+    /// default sits well below that ceiling.
     pub amount_nano: u128,
+    /// Convenience `amount_nano / 1e9` rendered as a float for human
+    /// display; not for accounting. Source of truth is `amount_nano`.
     pub drip_amount_lgt: f64,
 }
 

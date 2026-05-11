@@ -71,7 +71,11 @@ pub enum SignerError {
 
 #[derive(Debug, Clone)]
 pub struct DripReceipt {
-    /// Transaction hash returned by the chain.
+    /// Transaction hash returned by the chain. Bech32m with HRP `ltx`
+    /// (`ltx1...`) as of `ligate-chain@0ac7e5b`; previously raw hex.
+    /// Comes from `submit_raw_tx(...).to_string()`, so this string is
+    /// always in the chain's canonical Display form for whichever
+    /// chain rev the faucet is pointed at.
     pub tx_hash: String,
     /// Drip amount in nano-LGT.
     pub amount_nano: u128,
