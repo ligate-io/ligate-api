@@ -17,12 +17,14 @@
 
 use std::time::Duration;
 
+use ligate_api_types::{LedgerEvent, LedgerTx, SlotResponse};
 use sqlx::PgPool;
 use tracing::{debug, error, info, warn};
 
 use crate::client::NodeClient;
 use crate::db;
 use crate::error::IndexerError;
+use crate::parser;
 
 /// How long to wait between head-checks once we've caught up.
 const TAIL_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -119,6 +121,18 @@ pub async fn run(client: NodeClient, pool: PgPool, start_height: Option<u64>) ->
                         // will refetch head and try again.
                         break;
                     }
+                    // Walk the slot's batches → txs → events and
+                    // write parsed transactions. Logs the failure
+                    // and keeps going on error: tx ingest is a
+                    // best-effort layer on top of slot ingest, and
+                    // the slot row itself has already landed, so
+                    // the next-height cursor advances. A later
+                    // backfill PR can re-walk slots whose tx ingest
+                    // failed by comparing tx_count to actual row
+                    // counts in the transactions table.
+                    if let Err(e) = ingest_slot_transactions(&client, &pool, &slot).await {
+                        warn!(error = %e, height = h, "ingesting slot transactions; continuing");
+                    }
                     if let Err(e) = db::write_last_indexed_height(&pool, h).await {
                         warn!(error = %e, height = h, "updating cursor (slot was written)");
                     }
@@ -143,4 +157,90 @@ pub async fn run(client: NodeClient, pool: PgPool, start_height: Option<u64>) ->
             }
         }
     }
+}
+
+/// Walk one slot's batches → txs → events, classify each tx, and
+/// write rows to the `transactions` table.
+///
+/// Error handling: returns an error on chain-fetch failures (caller
+/// logs and continues with the next slot). Per-tx classify / db
+/// failures are logged but don't abort the slot — a single
+/// unparseable tx shouldn't halt ingest for the whole slot.
+async fn ingest_slot_transactions(
+    client: &NodeClient,
+    pool: &PgPool,
+    slot: &SlotResponse,
+) -> Result<(), IndexerError> {
+    let Some(batch_range) = slot.batch_range else {
+        // Slot doesn't expose a batch_range — chain rev that doesn't
+        // emit it, or a slot with zero batches. Nothing to do.
+        return Ok(());
+    };
+
+    // Fetch every event for this slot, grouped by `tx_hash`. One
+    // network call serves the whole slot's classification, avoiding
+    // a per-tx fetch on the events endpoint.
+    let all_events: Vec<LedgerEvent> = client.events_for_slot(slot.number).await?;
+
+    // Walk batches, then walk each batch's tx_range. Track
+    // position-in-slot for the `transactions.position` column.
+    let mut position_in_slot: i32 = 0;
+    for batch_number in batch_range.start..batch_range.end {
+        let batch = match client.batch_at(batch_number).await? {
+            Some(b) => b,
+            None => {
+                warn!(batch_number, "batch fetch returned 404; skipping");
+                continue;
+            }
+        };
+
+        for tx_number in batch.tx_range.start..batch.tx_range.end {
+            let tx: LedgerTx = match client.tx_at_number(tx_number).await? {
+                Some(t) => t,
+                None => {
+                    warn!(tx_number, "tx fetch returned 404; skipping");
+                    continue;
+                }
+            };
+
+            // Group events for this tx by matching tx_hash. Cheap —
+            // typical slot has 1-5 txs and a handful of events each.
+            let tx_events: Vec<&LedgerEvent> =
+                all_events.iter().filter(|e| e.tx_hash == tx.hash).collect();
+
+            let raw_event_keys: Vec<String> = tx_events.iter().map(|e| e.key.clone()).collect();
+
+            if let Some(classified) = parser::classify_tx(&tx, &tx_events) {
+                if let Err(e) = db::insert_transaction(
+                    pool,
+                    &classified,
+                    slot.number,
+                    position_in_slot,
+                    &raw_event_keys,
+                )
+                .await
+                {
+                    warn!(
+                        error = %e,
+                        tx_hash = %classified.hash,
+                        slot = slot.number,
+                        "inserting tx; continuing"
+                    );
+                }
+                position_in_slot += 1;
+            }
+            // Skipped txs (classify_tx returned None) don't get a
+            // row and don't increment the position counter — they
+            // didn't land in chain state.
+        }
+    }
+
+    debug!(
+        slot = slot.number,
+        batches = batch_range.end - batch_range.start,
+        txs_inserted = position_in_slot,
+        "slot tx ingest complete"
+    );
+
+    Ok(())
 }

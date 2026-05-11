@@ -8,10 +8,12 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use ligate_api_types::{RollupInfo, SlotResponse};
+use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
 use crate::error::Result;
+use crate::parser::{ClassifiedTx, IndexerTx, TxOutcome};
 
 /// State key under which the latest backfilled slot height is stored.
 /// Used as the resume-point cursor on indexer restart.
@@ -84,6 +86,109 @@ pub async fn upsert_slot(pool: &PgPool, slot: &SlotResponse) -> Result<()> {
     .bind(slot.batch_count.unwrap_or(0) as i32)
     .bind(slot.tx_count.unwrap_or(0) as i32)
     .bind(raw)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Insert one parsed transaction into the `transactions` table.
+///
+/// Idempotent on the `hash` primary key — re-running backfill against
+/// the same slots doesn't create duplicates. The `details` JSONB shape
+/// is per-`kind` per RFC 0002. Sender / nonce / fee fields are nullable
+/// because the chain elides the borsh-encoded body from REST (see
+/// migration 0003); the indexer records what it can derive from
+/// emitted events and leaves the rest `NULL`.
+///
+/// `raw` captures the full event payloads + tx number / batch number,
+/// so deep-dive views can extract fields the typed columns don't yet
+/// model.
+pub async fn insert_transaction(
+    pool: &PgPool,
+    classified: &ClassifiedTx,
+    slot_height: u64,
+    position_in_block: i32,
+    raw_event_keys: &[String],
+) -> Result<()> {
+    // Map the parser's IndexerTx variant to (kind_string, details_json).
+    let (kind, details) = match &classified.kind {
+        IndexerTx::Transfer(t) => (
+            "transfer",
+            serde_json::json!({
+                "from": t.from,
+                "to": t.to,
+                "amount_nano": t.amount_nano,
+                "token_id": t.token_id,
+            }),
+        ),
+        IndexerTx::Unknown { event_keys } => (
+            "unknown",
+            // RFC 0002 reserves `raw_call_disc: [u8, u8]` for the
+            // typed-but-unknown discriminator pair; the parser
+            // doesn't have access to the raw body bytes today (chain
+            // elides them), so we surface event keys instead as the
+            // forensic field. Schema's `details` is JSONB so adding
+            // a `raw_call_disc` field later is non-breaking.
+            serde_json::json!({ "event_keys": event_keys }),
+        ),
+    };
+
+    // Outcome: parser already filtered out `Skipped`, so we only see
+    // `Committed` or `Reverted` here. Map to the SQL CHECK constraint
+    // wording.
+    let outcome = match classified.outcome {
+        TxOutcome::Committed => "committed",
+        TxOutcome::Reverted => "reverted",
+        TxOutcome::Skipped => {
+            // Shouldn't happen — classify_tx returns None for skipped
+            // — but be defensive rather than panic.
+            return Ok(());
+        }
+    };
+
+    // Capture forensic data so the `raw` column has something useful
+    // for explorer deep-dive views. The schema requires it NOT NULL.
+    let raw: Value = serde_json::json!({
+        "batch_number": classified.batch_number,
+        "global_tx_number": classified.global_tx_number,
+        "event_keys": raw_event_keys,
+    });
+
+    // Per RFC 0002 / migration 0003, sender / sender_pubkey / nonce /
+    // fee_paid_nano are nullable. For Transfer txs we can fill `sender`
+    // from the event payload's `from.user`; pubkey / nonce / fee remain
+    // null until the chain exposes them on the REST surface.
+    let sender: Option<&str> = match &classified.kind {
+        IndexerTx::Transfer(t) => Some(t.from.as_str()),
+        IndexerTx::Unknown { .. } => None,
+    };
+
+    sqlx::query(
+        "INSERT INTO transactions (
+            hash, slot, position, sender, sender_pubkey, nonce, fee_paid_nano,
+            kind, details, raw, outcome, revert_reason
+         ) VALUES (
+            $1, $2, $3, $4, NULL, NULL, NULL,
+            $5, $6, $7, $8, NULL
+         )
+         ON CONFLICT (hash) DO UPDATE SET
+            slot         = EXCLUDED.slot,
+            position     = EXCLUDED.position,
+            sender       = EXCLUDED.sender,
+            kind         = EXCLUDED.kind,
+            details      = EXCLUDED.details,
+            raw          = EXCLUDED.raw,
+            outcome      = EXCLUDED.outcome,
+            indexed_at   = NOW()",
+    )
+    .bind(&classified.hash)
+    .bind(slot_height as i64)
+    .bind(position_in_block)
+    .bind(sender)
+    .bind(kind)
+    .bind(details)
+    .bind(raw)
+    .bind(outcome)
     .execute(pool)
     .await?;
     Ok(())
