@@ -104,15 +104,93 @@ pub struct DripStatusResponse {
     pub faucet_address: String,
 }
 
-pub async fn drip_status(State(state): State<AppState>) -> impl IntoResponse {
+/// Per-address drip-status response, returned when
+/// `GET /v1/drip/status?address=<addr>` carries an `address` query
+/// param. `next_drip_at` is RFC3339 UTC millis when `can_drip` is
+/// `false`, and `null` when `can_drip` is `true`.
+#[derive(Debug, Serialize)]
+pub struct AddressDripStatusResponse {
+    pub can_drip: bool,
+    pub next_drip_at: Option<String>,
+}
+
+/// Untagged: the wire body is one of the two shapes inline, with no
+/// `kind` discriminator. The explorer's faucet UI peeks
+/// `can_drip` to decide; operator dashboards continue reading the
+/// global config shape via the no-param call.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum DripStatusBody {
+    Global(DripStatusResponse),
+    PerAddress(AddressDripStatusResponse),
+}
+
+/// Optional `?address=<addr>` query param on `/v1/drip/status`. Empty
+/// or absent → global config shape; present → per-address eligibility.
+#[derive(Debug, Deserialize)]
+pub struct DripStatusQuery {
+    pub address: Option<String>,
+}
+
+/// `GET /v1/drip/status[?address=<addr>]`.
+///
+/// Two response shapes, dispatched on the presence of the `address`
+/// query param:
+///
+/// - **No param** (operator dashboards, default explorer headers):
+///   global config (drip amount, rate-limit window, distinct
+///   addresses dripped, faucet address).
+/// - **`?address=lig1...`** (explorer faucet UI): per-address
+///   eligibility, `{ can_drip, next_drip_at }`. `next_drip_at` is
+///   the absolute RFC3339-millis UTC instant the cooldown clears, or
+///   `null` when the address can drip right now.
+///
+/// The per-address branch reads via the rate-limiter's non-mutating
+/// `peek` so it never burns a window slot. Repeated polls from the
+/// explorer's faucet page don't accidentally start a cooldown for an
+/// address that hasn't actually dripped.
+pub async fn drip_status(
+    State(state): State<AppState>,
+    Query(params): Query<DripStatusQuery>,
+) -> impl IntoResponse {
+    if let Some(addr) = params.address.as_deref().filter(|s| !s.is_empty()) {
+        let body = match state.rate_limiter.peek(addr) {
+            RateCheck::Allowed => AddressDripStatusResponse {
+                can_drip: true,
+                next_drip_at: None,
+            },
+            RateCheck::Blocked { retry_after } => {
+                // `chrono::Utc::now() + retry_after` puts the cooldown
+                // boundary in absolute time so the explorer can render
+                // a stable "comes back at HH:MM" without re-syncing
+                // its clock against the server. Millisecond precision
+                // matches the rest of the api's RFC3339 emissions.
+                //
+                // `from_std` only fails when the `std::time::Duration`
+                // exceeds `i64::MAX` milliseconds (~292 million years);
+                // a rate-limit window can never reach that. Saturate
+                // to `Duration::zero()` on the impossible-fail branch
+                // so the handler can't panic on a poisoned input.
+                let bump = chrono::Duration::from_std(retry_after)
+                    .unwrap_or_else(|_| chrono::Duration::zero());
+                let next = chrono::Utc::now() + bump;
+                AddressDripStatusResponse {
+                    can_drip: false,
+                    next_drip_at: Some(next.to_rfc3339_opts(SecondsFormat::Millis, true)),
+                }
+            }
+        };
+        return Json(DripStatusBody::PerAddress(body));
+    }
+
     let drip_nano = state.config.drip_amount;
-    Json(DripStatusResponse {
+    Json(DripStatusBody::Global(DripStatusResponse {
         drip_amount_nano: drip_nano,
         drip_amount_lgt: nano_to_lgt(drip_nano),
         rate_limit_secs: state.config.drip_rate_limit_secs,
         addresses_dripped: state.rate_limiter.drip_count(),
         faucet_address: state.signer.address(),
-    })
+    }))
 }
 
 pub async fn drip(
