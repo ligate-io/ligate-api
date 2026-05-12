@@ -446,6 +446,88 @@ pub struct MultiAddress {
     pub user: String,
 }
 
+// ---- Attestation module event payloads -------------------------------------
+//
+// Each variant of `attestation::AttestationEvent<S>` serialises via
+// serde's default externally-tagged enum encoding: `{<snake_case
+// variant>: {<fields>}}`. The three structs below mirror the chain's
+// `crates/modules/attestation/src/lib.rs::AttestationEvent` payload
+// shapes for indexing. Chain-side spec lives in ligate-chain PR #297.
+
+/// Payload of `Attestation/AttestorSetRegistered`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AttestationAttestorSetRegisteredEvent {
+    /// External tag, serde's default for `enum::AttestorSetRegistered { ... }`.
+    pub attestor_set_registered: AttestorSetRegisteredDetails,
+}
+
+/// Inner fields of `Attestation/AttestorSetRegistered`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AttestorSetRegisteredDetails {
+    /// Bech32m `las1...` deterministic id.
+    pub attestor_set_id: String,
+    /// Member pubkeys (bech32m `lpk1...`), sorted post-canonicalisation.
+    pub members: Vec<String>,
+    /// M-of-N threshold.
+    pub threshold: u8,
+    /// Address that paid the registration fee.
+    pub registered_by: MultiAddress,
+}
+
+/// Payload of `Attestation/SchemaRegistered`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AttestationSchemaRegisteredEvent {
+    /// External tag.
+    pub schema_registered: SchemaRegisteredDetails,
+}
+
+/// Inner fields of `Attestation/SchemaRegistered`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SchemaRegisteredDetails {
+    /// Bech32m `lsc1...` deterministic id.
+    pub schema_id: String,
+    /// Schema name (e.g. `themisra.proof-of-prompt`).
+    pub name: String,
+    /// Schema version (monotonic per name+owner).
+    pub version: u32,
+    /// Owner address — receives schema-routed fees.
+    pub owner: MultiAddress,
+    /// Bound attestor set id (bech32m `las1...`).
+    pub attestor_set_id: String,
+    /// Fee-routing share in basis points (0..=cap).
+    pub fee_routing_bps: u16,
+    /// Destination address for the routed share. `None` iff
+    /// `fee_routing_bps == 0`.
+    #[serde(default)]
+    pub fee_routing_addr: Option<MultiAddress>,
+    /// SHA-256 of the canonical schema-doc bytes. Chain serialises
+    /// the `[u8; 32]` as a hex string (with or without `0x` prefix
+    /// depending on the chain rev). Kept as `serde_json::Value` so
+    /// future chain encodings (e.g. bech32m wrap) don't break ingest;
+    /// the indexer stringifies and stores verbatim.
+    pub payload_shape_hash: Value,
+}
+
+/// Payload of `Attestation/AttestationSubmitted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AttestationAttestationSubmittedEvent {
+    /// External tag.
+    pub attestation_submitted: AttestationSubmittedDetails,
+}
+
+/// Inner fields of `Attestation/AttestationSubmitted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AttestationSubmittedDetails {
+    /// Bech32m `lsc1...` schema id.
+    pub schema_id: String,
+    /// Bech32m `lph1...` payload hash.
+    pub payload_hash: String,
+    /// Submitter address (paid the attestation fee).
+    pub submitter: MultiAddress,
+    /// Number of attestor signatures included.
+    pub signature_count: u32,
+}
+
 /// `(amount, token_id)` pair as emitted by the bank module.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Coins {

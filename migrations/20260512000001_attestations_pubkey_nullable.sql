@@ -1,0 +1,26 @@
+-- ============================================================================
+-- Migration 0004 — relax `attestations.submitter_pubkey` to NULL-able
+-- ============================================================================
+--
+-- The original migration 0002 declared `attestations.submitter_pubkey`
+-- as NOT NULL on the assumption that the chain would emit the
+-- submitter's pubkey alongside their address in the
+-- `Attestation/AttestationSubmitted` event payload.
+--
+-- ligate-chain PR #297 (which lands the typed AttestationEvents this
+-- indexer ingests from) carries `submitter` as `S::Address` only —
+-- the call site `Context<S>` doesn't expose the raw pubkey, only the
+-- derived 28-byte address. Resolving pubkey at the call site would
+-- require an additional `accounts` module lookup per emit, which
+-- isn't a fight worth picking for v0.
+--
+-- Indexer-side compromise: surface `submitter_pubkey` as nullable.
+-- Partners who need the pubkey can resolve it from the `accounts`
+-- module's state via the chain RPC at read time. Same pattern as
+-- migration 0003 for the chain-elided body fields on
+-- `transactions`.
+--
+-- A future migration can re-tighten if a chain change starts carrying
+-- pubkey in the event payload.
+
+ALTER TABLE attestations ALTER COLUMN submitter_pubkey DROP NOT NULL;

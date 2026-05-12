@@ -13,7 +13,10 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
 use crate::error::Result;
-use crate::parser::{ClassifiedTx, IndexerTx, TxOutcome};
+use crate::parser::{
+    ClassifiedTx, IndexerRegisterAttestorSet, IndexerRegisterSchema, IndexerSubmitAttestation,
+    IndexerTx, TxOutcome,
+};
 
 /// State key under which the latest backfilled slot height is stored.
 /// Used as the resume-point cursor on indexer restart.
@@ -126,6 +129,34 @@ pub async fn insert_transaction(
                 "token_id": t.token_id,
             }),
         ),
+        IndexerTx::RegisterAttestorSet(d) => (
+            "register_attestor_set",
+            serde_json::json!({
+                "attestor_set_id": d.attestor_set_id,
+                "members": d.members,
+                "threshold": d.threshold,
+            }),
+        ),
+        IndexerTx::RegisterSchema(d) => (
+            "register_schema",
+            serde_json::json!({
+                "schema_id": d.schema_id,
+                "name": d.name,
+                "version": d.version,
+                "attestor_set_id": d.attestor_set_id,
+                "fee_routing_bps": d.fee_routing_bps,
+                "fee_routing_addr": d.fee_routing_addr,
+                "payload_shape_hash": d.payload_shape_hash,
+            }),
+        ),
+        IndexerTx::SubmitAttestation(d) => (
+            "submit_attestation",
+            serde_json::json!({
+                "schema_id": d.schema_id,
+                "payload_hash": d.payload_hash,
+                "signature_count": d.signature_count,
+            }),
+        ),
         IndexerTx::Unknown { event_keys } => (
             "unknown",
             // RFC 0002 reserves `raw_call_disc: [u8, u8]` for the
@@ -161,10 +192,15 @@ pub async fn insert_transaction(
 
     // Per RFC 0002 / migration 0003, sender / sender_pubkey / nonce /
     // fee_paid_nano are nullable. For Transfer txs we can fill `sender`
-    // from the event payload's `from.user`; pubkey / nonce / fee remain
-    // null until the chain exposes them on the REST surface.
+    // from the event payload's `from.user`; for Attestation-module
+    // events we get sender from the typed payload (registered_by /
+    // owner / submitter); pubkey / nonce / fee remain null until the
+    // chain exposes them on the REST surface.
     let sender: Option<&str> = match &classified.kind {
         IndexerTx::Transfer(t) => Some(t.from.as_str()),
+        IndexerTx::RegisterAttestorSet(d) => Some(d.registered_by.as_str()),
+        IndexerTx::RegisterSchema(d) => Some(d.owner.as_str()),
+        IndexerTx::SubmitAttestation(d) => Some(d.submitter.as_str()),
         IndexerTx::Unknown { .. } => None,
     };
 
@@ -196,6 +232,230 @@ pub async fn insert_transaction(
     .bind(outcome)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Insert one row into `attestor_sets` from a parsed
+/// `Attestation/AttestorSetRegistered` event payload.
+///
+/// Idempotent on (id) primary key. Maintains `attestor_sets.members`
+/// as a JSONB array of bech32m `lpk1...` strings — same order the
+/// chain canonicalises to. `schema_count` starts at 0 and is bumped
+/// by [`bump_attestor_set_schema_count`] when a schema registers
+/// against this set.
+///
+/// FK: `registered_at_tx` references `transactions(hash)`. Caller
+/// must `insert_transaction` BEFORE calling this; the ingest loop
+/// already does so.
+pub async fn insert_attestor_set(
+    pool: &PgPool,
+    d: &IndexerRegisterAttestorSet,
+    tx_hash: &str,
+    slot_height: u64,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let members_json = serde_json::Value::Array(
+        d.members
+            .iter()
+            .map(|m| serde_json::Value::String(m.clone()))
+            .collect(),
+    );
+
+    sqlx::query(
+        "INSERT INTO attestor_sets (
+            id, members, threshold,
+            registered_at_slot, registered_at_tx, registered_at_timestamp,
+            schema_count
+         ) VALUES ($1, $2, $3, $4, $5, $6, 0)
+         ON CONFLICT (id) DO UPDATE SET
+            members                = EXCLUDED.members,
+            threshold              = EXCLUDED.threshold,
+            registered_at_slot     = EXCLUDED.registered_at_slot,
+            registered_at_tx       = EXCLUDED.registered_at_tx,
+            registered_at_timestamp = EXCLUDED.registered_at_timestamp,
+            indexed_at             = NOW()",
+    )
+    .bind(&d.attestor_set_id)
+    .bind(members_json)
+    .bind(i32::from(d.threshold))
+    .bind(slot_height as i64)
+    .bind(tx_hash)
+    .bind(timestamp)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Insert one row into `schemas` from a parsed
+/// `Attestation/SchemaRegistered` event payload.
+///
+/// FKs: `attestor_set_id` → `attestor_sets(id)`, `registered_at_tx`
+/// → `transactions(hash)`. The chain emits `RegisterSchema` only
+/// AFTER the bound `RegisterAttestorSet`, and the ingest loop
+/// inserts transactions before resource rows — so both FKs are
+/// satisfied in normal operation. If the FK fails (e.g. ingest
+/// started mid-stream and missed the attestor set), the insert
+/// errors and the caller logs-and-continues.
+pub async fn insert_schema(
+    pool: &PgPool,
+    d: &IndexerRegisterSchema,
+    tx_hash: &str,
+    slot_height: u64,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO schemas (
+            id, name, version, owner, attestor_set_id,
+            fee_routing_bps, fee_routing_addr, payload_shape_hash,
+            registered_at_slot, registered_at_tx, registered_at_timestamp,
+            attestation_count
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0
+         )
+         ON CONFLICT (id) DO UPDATE SET
+            -- Schemas are immutable on-chain; the only field that can
+            -- change at re-ingest is the bookkeeping. `indexed_at`
+            -- bump signals \"saw this row again\".
+            indexed_at = NOW()",
+    )
+    .bind(&d.schema_id)
+    .bind(&d.name)
+    .bind(i32::try_from(d.version).unwrap_or(i32::MAX))
+    .bind(&d.owner)
+    .bind(&d.attestor_set_id)
+    .bind(i32::from(d.fee_routing_bps))
+    .bind(d.fee_routing_addr.as_deref())
+    .bind(&d.payload_shape_hash)
+    .bind(slot_height as i64)
+    .bind(tx_hash)
+    .bind(timestamp)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Insert one row into `attestations`. `submitter_pubkey` is NULL
+/// (chain doesn't carry it in the event payload; migration 0004
+/// loosened the NOT NULL).
+///
+/// FKs: `schema_id` → `schemas(id)`, `submitted_at_tx` →
+/// `transactions(hash)`.
+pub async fn insert_attestation(
+    pool: &PgPool,
+    d: &IndexerSubmitAttestation,
+    tx_hash: &str,
+    slot_height: u64,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO attestations (
+            schema_id, payload_hash, submitter, submitter_pubkey,
+            submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
+            signature_count
+         ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7)
+         ON CONFLICT (schema_id, payload_hash, submitted_at_tx) DO UPDATE SET
+            signature_count = EXCLUDED.signature_count,
+            indexed_at      = NOW()",
+    )
+    .bind(&d.schema_id)
+    .bind(&d.payload_hash)
+    .bind(&d.submitter)
+    .bind(slot_height as i64)
+    .bind(tx_hash)
+    .bind(timestamp)
+    .bind(i32::try_from(d.signature_count).unwrap_or(i32::MAX))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Bump `attestor_sets.schema_count` for the given attestor set id.
+///
+/// Called after `insert_schema` succeeds; tracks how many schemas
+/// have bound to each attestor set. Schemas are immutable on-chain
+/// so this counter is monotonically increasing; never decremented.
+///
+/// No-op if the attestor set doesn't exist (FK-violation territory;
+/// the schema insert would already have failed).
+pub async fn bump_attestor_set_schema_count(pool: &PgPool, attestor_set_id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE attestor_sets
+         SET schema_count = schema_count + 1, indexed_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(attestor_set_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Bump `schemas.attestation_count` for the given schema id.
+///
+/// Called after `insert_attestation` succeeds. Same monotonicity
+/// rules as `bump_attestor_set_schema_count`.
+pub async fn bump_schema_attestation_count(pool: &PgPool, schema_id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE schemas
+         SET attestation_count = attestation_count + 1, indexed_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(schema_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Bump `address_summaries.schemas_owned_count` for the schema owner
+/// when a schema registers. Upserts the row if the address has no
+/// existing summary yet (a fresh owner who's never sent a tx),
+/// initialising counters at 0 and seeding first_seen/last_seen with
+/// the schema-registration tx so the summary stays internally
+/// consistent (the CHECK constraint requires all-or-nothing).
+pub async fn bump_address_schemas_owned(
+    pool: &PgPool,
+    owner: &str,
+    slot_height: u64,
+    tx_hash: &str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO address_summaries (
+            address,
+            txs_sent_count, txs_received_count,
+            first_seen_slot, first_seen_tx, first_seen_timestamp,
+            last_seen_slot,  last_seen_tx,  last_seen_timestamp,
+            schemas_owned_count, attestor_member_count
+         ) VALUES (
+            $1, 0, 0, $2, $3, $4, $2, $3, $4, 1, 0
+         )
+         ON CONFLICT (address) DO UPDATE SET
+            schemas_owned_count = address_summaries.schemas_owned_count + 1,
+            indexed_at          = NOW()",
+    )
+    .bind(owner)
+    .bind(slot_height as i64)
+    .bind(tx_hash)
+    .bind(timestamp)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Bump `address_summaries.attestor_member_count` for one member
+/// pubkey when an attestor set registers. The schema's
+/// `attestor_member_count` field is on the address summary, not the
+/// pubkey directly; the indexer can't trivially resolve pubkey →
+/// address without a chain query. For v0 we store the count keyed
+/// by the bech32m `lpk1...` pubkey string itself in the
+/// `address_summaries.address` column — partners querying by
+/// address would not find it. Tracked as a v0 gap; a follow-up can
+/// derive `address = pubkey[..28]` per the chain's address rule.
+///
+/// For now: skip. Calling this is a no-op until address resolution
+/// lands. The schema's column stays correct (default 0); we just
+/// can't increment it without the address derivation.
+pub async fn bump_attestor_member_count(_pool: &PgPool, _member_pubkey: &str) -> Result<()> {
+    // No-op for v0. See doc comment.
     Ok(())
 }
 
