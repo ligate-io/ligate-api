@@ -125,12 +125,11 @@ async fn ingest_loop_writes_chain_identity_and_first_slot() {
     );
 
     // Chain identity should have been bootstrapped to indexer_state.
-    let chain_id: Option<String> = sqlx::query_scalar(
-        "SELECT v FROM indexer_state WHERE k = 'chain_id'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("read chain_id from indexer_state");
+    let chain_id: Option<String> =
+        sqlx::query_scalar("SELECT v FROM indexer_state WHERE k = 'chain_id'")
+            .fetch_optional(&pool)
+            .await
+            .expect("read chain_id from indexer_state");
     assert_eq!(chain_id.as_deref(), Some("ligate-e2e-test"));
 }
 
