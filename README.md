@@ -132,7 +132,23 @@ cargo test                             # tests
 cargo build --release --bin ligate-api # production build (locally)
 ```
 
-CI runs all four on every PR. See `.github/workflows/ci.yml`.
+CI runs all four on every PR, plus a Postgres-backed e2e smoke for the indexer. See `.github/workflows/ci.yml`.
+
+### Running the e2e indexer smoke locally
+
+The `e2e-indexer` CI job spins up Postgres in a service container, applies migrations, then runs the indexer's ingest loop against a `mockito`-stubbed chain REST surface and asserts rows landed in the DB. To reproduce locally:
+
+```bash
+# Start a local Postgres (any flavor — docker, postgres.app, brew services).
+# Then apply the migrations and point the test at it:
+export DATABASE_URL=postgres://ligate:ligate@localhost:5432/ligate_indexer
+for f in $(ls migrations/*.sql | sort); do
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+done
+cargo test -p ligate-api-indexer --test e2e -- --nocapture
+```
+
+The test is skipped (not failed) when `DATABASE_URL` is unset, so plain `cargo test` stays green for the local-without-Postgres flow.
 
 ## Status
 

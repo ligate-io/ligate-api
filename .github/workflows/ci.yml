@@ -136,6 +136,58 @@ jobs:
             fi
           done
 
+  # End-to-end indexer smoke. Spins up Postgres, applies migrations,
+  # then runs `cargo test -p ligate-api-indexer --test e2e` which
+  # stubs the chain REST surface via `mockito` and asserts the
+  # indexer's ingest loop writes chain identity + the first slot row
+  # to the real DB.
+  #
+  # Why not boot a real `ligate-node`: cold-cache build of the chain
+  # binary is ~10 min in CI; the marginal coverage over canned chain
+  # responses is low (typed deserialisation is already covered by
+  # unit tests in `client.rs`). The thing this test actually catches
+  # is "do the rows land in Postgres" — the failure mode the
+  # mockito-only unit tests can't see. A real-chain `e2e-chain` job
+  # can layer on top later (gated on the chain repo's docker image,
+  # ligate-io/ligate-chain#280).
+  e2e-indexer:
+    name: indexer e2e
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ligate
+          POSTGRES_PASSWORD: ligate
+          POSTGRES_DB: ligate_indexer
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ligate -d ligate_indexer"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+      - name: Install libclang (librocksdb-sys build dep)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply migrations
+        env:
+          PGPASSWORD: ligate
+        run: |
+          set -euo pipefail
+          for f in $(ls migrations/*.sql | sort); do
+            psql -h localhost -U ligate -d ligate_indexer -v ON_ERROR_STOP=1 -f "${f}"
+          done
+      - name: Run e2e test
+        env:
+          DATABASE_URL: postgres://ligate:ligate@localhost:5432/ligate_indexer
+        run: cargo test -p ligate-api-indexer --test e2e -- --nocapture
+
   # Single summary check that the branch ruleset can require. Mirrors
   # the pattern from `ligate-io/ligate-chain`. By gating the ruleset
   # on `CI pass` instead of each individual job, we get a stable
@@ -143,7 +195,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [fmt, clippy, check, migrate]
+    needs: [fmt, clippy, check, migrate, e2e-indexer]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required checks
@@ -152,10 +204,11 @@ jobs:
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           CHECK_RESULT: ${{ needs.check.result }}
           MIGRATE_RESULT: ${{ needs.migrate.result }}
+          E2E_INDEXER_RESULT: ${{ needs.e2e-indexer.result }}
         run: |
           set -euo pipefail
           fail=0
-          for var in FMT_RESULT CLIPPY_RESULT CHECK_RESULT MIGRATE_RESULT; do
+          for var in FMT_RESULT CLIPPY_RESULT CHECK_RESULT MIGRATE_RESULT E2E_INDEXER_RESULT; do
             result="${!var}"
             if [[ "$result" != "success" ]]; then
               echo "::error::${var,,}: $result"
