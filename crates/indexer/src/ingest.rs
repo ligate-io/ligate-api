@@ -221,10 +221,8 @@ async fn ingest_slot_transactions(
             // `LedgerEvent.tx_hash` (since SDK fork rev `49e9b2057`
             // landed via ligate-chain #300), so a straight equality
             // check is enough.
-            let tx_events: Vec<&LedgerEvent> = all_events
-                .iter()
-                .filter(|e| e.tx_hash == tx.hash)
-                .collect();
+            let tx_events: Vec<&LedgerEvent> =
+                all_events.iter().filter(|e| e.tx_hash == tx.hash).collect();
 
             let raw_event_keys: Vec<String> = tx_events.iter().map(|e| e.key.clone()).collect();
 
