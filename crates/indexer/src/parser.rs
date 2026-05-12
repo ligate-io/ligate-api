@@ -177,44 +177,6 @@ pub struct IndexerSubmitAttestation {
 /// `/v1/ledger/slots/{n}/events` once, group by `tx_hash`).
 /// Normalise a tx-hash string to a canonical 64-char lowercase-hex
 /// form (no `0x` prefix), regardless of whether the input is
-/// `ltx1...` bech32m, `0x{hex}`, or bare hex.
-///
-/// The chain currently emits inconsistent forms across endpoints:
-///
-/// - `GET /v1/ledger/txs/{n}.hash` → `ltx1...` (bech32m, post-`0ac7e5b`)
-/// - `GET /v1/ledger/slots/{n}/events[*].tx_hash` → `0x{hex}` (legacy)
-///
-/// Same underlying 32 bytes, different Display. The indexer groups
-/// events to txs by hash, so it needs to compare these as bytes.
-/// Tracked upstream as a consistency fix (see ligate-chain follow-up
-/// for canonicalising the event tx_hash to bech32m). Until that
-/// lands, this helper normalises both sides so the comparison works.
-///
-/// Returns the input unchanged on a parse failure rather than an
-/// `Option<String>` — keeps the call site a one-liner and a
-/// malformed hash just fails the per-tx event filter, which is
-/// already the failure mode for an unrecognised tx kind.
-pub fn normalize_tx_hash(s: &str) -> String {
-    // Bech32m → bytes → hex.
-    if let Some(stripped) = s.strip_prefix("ltx1") {
-        // Re-add the HRP for the decoder. The bech32 0.11 crate's
-        // `decode` needs the full string including HRP + separator.
-        let full = format!("ltx1{stripped}");
-        if let Ok((_hrp, data)) = bech32::decode(&full) {
-            if data.len() == 32 {
-                return hex::encode(&data);
-            }
-        }
-        // Fall through to passthrough on decode failure.
-        return s.to_lowercase();
-    }
-    // 0x-prefixed or bare hex → strip prefix + lowercase.
-    if let Some(stripped) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        return stripped.to_lowercase();
-    }
-    s.to_lowercase()
-}
-
 pub fn classify_tx(tx: &LedgerTx, events: &[&LedgerEvent]) -> Option<ClassifiedTx> {
     let outcome = outcome_of(&tx.receipt.result);
     if outcome == TxOutcome::Skipped {

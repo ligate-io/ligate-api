@@ -3987,10 +3987,8 @@ name = "ligate-api-indexer"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "bech32",
  "chrono",
  "futures",
- "hex",
  "ligate-api-types",
  "mockito",
  "reqwest 0.12.28",

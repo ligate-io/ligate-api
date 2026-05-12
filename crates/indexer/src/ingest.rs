@@ -217,16 +217,12 @@ async fn ingest_slot_transactions(
             };
 
             // Group events for this tx by matching tx_hash. The chain
-            // currently emits the tx-hash field in two different
-            // encodings on different endpoints (`ltx1...` on the tx
-            // detail, `0x{hex}` in the slot events list); normalise
-            // both to canonical hex before comparing so the filter
-            // catches them.
-            let tx_hash_canonical = parser::normalize_tx_hash(&tx.hash);
-            let tx_events: Vec<&LedgerEvent> = all_events
-                .iter()
-                .filter(|e| parser::normalize_tx_hash(&e.tx_hash) == tx_hash_canonical)
-                .collect();
+            // emits the same bech32m form on both `LedgerTx.hash` and
+            // `LedgerEvent.tx_hash` (since SDK fork rev `49e9b2057`
+            // landed via ligate-chain #300), so a straight equality
+            // check is enough.
+            let tx_events: Vec<&LedgerEvent> =
+                all_events.iter().filter(|e| e.tx_hash == tx.hash).collect();
 
             let raw_event_keys: Vec<String> = tx_events.iter().map(|e| e.key.clone()).collect();
 
