@@ -150,6 +150,70 @@ pub struct TxResponse {
     pub revert_reason: Option<String>,
 }
 
+/// One schema, served at `GET /v1/schemas/{id}` and as each element
+/// of the list at `GET /v1/schemas`.
+///
+/// Mirrors RFC 0002 §"Schema". `registered_at` is a nested
+/// `{block_height, tx_hash, timestamp}` shape so partners can deep-link
+/// to the registering tx without a separate lookup.
+#[derive(Debug, Serialize)]
+pub struct SchemaResponse {
+    /// Bech32m `lsc1...` deterministic id.
+    pub id: String,
+    /// Schema name (e.g. `themisra.proof-of-prompt`).
+    pub name: String,
+    /// Monotonic version, scoped per (owner, name).
+    pub version: u32,
+    /// Owner address, bech32m `lig1...`.
+    pub owner: String,
+    /// Bound attestor set id, bech32m `las1...`.
+    pub attestor_set_id: String,
+    /// Fee-routing share in basis points (0..=10000).
+    pub fee_routing_bps: u16,
+    /// Destination for the routed share. `null` iff `bps == 0`.
+    pub fee_routing_addr: Option<String>,
+    /// SHA-256 of canonical schema-doc bytes. Format echoed from the
+    /// chain event payload; typically hex with optional `0x` prefix.
+    pub payload_shape_hash: String,
+    /// Provenance of the registration tx.
+    pub registered_at: RegisteredAtResponse,
+    /// Denormalised count of attestations bound to this schema.
+    /// Maintained at ingest time.
+    pub attestation_count: u32,
+}
+
+/// One attestor set, served at `GET /v1/attestor-sets/{id}` and as
+/// each element of `GET /v1/attestor-sets` (list endpoint isn't
+/// shipped yet; reserved per RFC 0001's tracking ticket).
+#[derive(Debug, Serialize)]
+pub struct AttestorSetResponse {
+    /// Bech32m `las1...` deterministic id.
+    pub id: String,
+    /// Member pubkeys, bech32m `lpk1...`. Sorted by raw byte order
+    /// (matches the chain's canonicalisation rule used in
+    /// `derive_id`).
+    pub members: Vec<String>,
+    /// M-of-N threshold (1..=members.len()).
+    pub threshold: u8,
+    /// Provenance of the registration tx.
+    pub registered_at: RegisteredAtResponse,
+    /// Denormalised count of schemas bound to this set. Maintained
+    /// at ingest time.
+    pub schema_count: u32,
+}
+
+/// Common `registered_at` sub-shape for [`SchemaResponse`] +
+/// [`AttestorSetResponse`].
+#[derive(Debug, Serialize)]
+pub struct RegisteredAtResponse {
+    /// Slot height of the registering tx.
+    pub block_height: u64,
+    /// Tx hash (bech32m `ltx1...` since `ligate-chain@0ac7e5b`).
+    pub tx_hash: String,
+    /// RFC3339 millisecond-precision UTC timestamp.
+    pub timestamp: String,
+}
+
 /// Per-address summary, served at `GET /v1/addresses/{addr}`.
 ///
 /// Balances come from the chain proxy at handler time (sov-bank's
