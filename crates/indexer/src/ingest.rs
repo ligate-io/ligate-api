@@ -246,19 +246,33 @@ async fn ingest_slot_transactions(
                         slot = slot.number,
                         "inserting tx; continuing"
                     );
-                } else if let Err(e) =
-                    update_address_summaries(pool, &classified, slot.number, slot_timestamp).await
-                {
-                    // address_summaries is denormalised data; failure
-                    // here doesn't invalidate the tx row, just leaves
-                    // counters stale until a future re-index. Log and
-                    // continue rather than back the tx out.
-                    warn!(
-                        error = %e,
-                        tx_hash = %classified.hash,
-                        slot = slot.number,
-                        "updating address_summaries; counter is now stale"
-                    );
+                } else {
+                    // Tx row landed. Fan out to the per-kind resource
+                    // inserts (attestor_sets / schemas / attestations)
+                    // and the denormalised counter maintenance. Each
+                    // is independent — log and continue on failure
+                    // rather than back the tx out.
+                    if let Err(e) =
+                        update_address_summaries(pool, &classified, slot.number, slot_timestamp)
+                            .await
+                    {
+                        warn!(
+                            error = %e,
+                            tx_hash = %classified.hash,
+                            slot = slot.number,
+                            "updating address_summaries; counter stale"
+                        );
+                    }
+                    if let Err(e) =
+                        insert_resource_rows(pool, &classified, slot.number, slot_timestamp).await
+                    {
+                        warn!(
+                            error = %e,
+                            tx_hash = %classified.hash,
+                            slot = slot.number,
+                            "inserting resource rows (attestor_set/schema/attestation); continuing"
+                        );
+                    }
                 }
                 position_in_slot += 1;
             }
@@ -278,33 +292,119 @@ async fn ingest_slot_transactions(
     Ok(())
 }
 
-/// Update `address_summaries` counters + first/last seen for both
-/// roles a tx exposes. Sender always, plus the recipient for transfers.
+/// Insert the resource-table rows that a classified tx implies:
 ///
-/// Independent of the tx insert (different table, no FK constraint).
-/// Called after `insert_transaction` succeeds. The chain's other tx
-/// kinds (`register_attestor_set` / `register_schema` /
-/// `submit_attestation`) will gain analogous handling here once
-/// Phase D's classifier extension lands (gated on ligate-chain#295).
+/// - `RegisterAttestorSet` -> `attestor_sets` row.
+/// - `RegisterSchema` -> `schemas` row + bump `attestor_sets.schema_count`
+///   + bump `address_summaries.schemas_owned_count` for the owner.
+/// - `SubmitAttestation` -> `attestations` row + bump
+///   `schemas.attestation_count`.
+/// - Other kinds (Transfer, Unknown) -> nothing.
+///
+/// Each step is best-effort: an FK failure or transient Postgres
+/// error on one bump doesn't abort the rest of the ingest, and the
+/// tx row itself is already committed by this point. A re-index can
+/// recompute counters from the source-of-truth tables (schemas /
+/// attestations) if drift is observed.
+async fn insert_resource_rows(
+    pool: &PgPool,
+    classified: &parser::ClassifiedTx,
+    slot_height: u64,
+    slot_timestamp: DateTime<Utc>,
+) -> Result<(), IndexerError> {
+    match &classified.kind {
+        IndexerTx::RegisterAttestorSet(d) => {
+            db::insert_attestor_set(pool, d, &classified.hash, slot_height, slot_timestamp).await?;
+            // Best-effort attestor_member_count bumps; no-op in v0
+            // (see db::bump_attestor_member_count doc).
+            for member in &d.members {
+                let _ = db::bump_attestor_member_count(pool, member).await;
+            }
+        }
+        IndexerTx::RegisterSchema(d) => {
+            db::insert_schema(pool, d, &classified.hash, slot_height, slot_timestamp).await?;
+            // Bump the bound attestor set's schema_count and the
+            // owner's schemas_owned_count. Failures on either don't
+            // back out the schema row.
+            if let Err(e) = db::bump_attestor_set_schema_count(pool, &d.attestor_set_id).await {
+                warn!(
+                    error = %e,
+                    attestor_set_id = %d.attestor_set_id,
+                    "bumping attestor_set.schema_count; counter stale"
+                );
+            }
+            if let Err(e) = db::bump_address_schemas_owned(
+                pool,
+                &d.owner,
+                slot_height,
+                &classified.hash,
+                slot_timestamp,
+            )
+            .await
+            {
+                warn!(
+                    error = %e,
+                    owner = %d.owner,
+                    "bumping address.schemas_owned_count; counter stale"
+                );
+            }
+        }
+        IndexerTx::SubmitAttestation(d) => {
+            db::insert_attestation(pool, d, &classified.hash, slot_height, slot_timestamp).await?;
+            if let Err(e) = db::bump_schema_attestation_count(pool, &d.schema_id).await {
+                warn!(
+                    error = %e,
+                    schema_id = %d.schema_id,
+                    "bumping schema.attestation_count; counter stale"
+                );
+            }
+        }
+        IndexerTx::Transfer(_) | IndexerTx::Unknown { .. } => {
+            // No resource rows to insert for transfers or unknown
+            // kinds. Address-summary counters are maintained by
+            // `update_address_summaries`.
+        }
+    }
+    Ok(())
+}
+
+/// Update `address_summaries` counters + first/last seen for the
+/// roles a tx exposes. Transfers carry sender + recipient. The
+/// Attestation-module kinds (`register_attestor_set` /
+/// `register_schema` / `submit_attestation`) only carry a sender
+/// (the registrar / owner / submitter); their dedicated counters
+/// (`schemas_owned_count`, etc.) are maintained by
+/// `insert_resource_rows`.
 async fn update_address_summaries(
     pool: &PgPool,
     classified: &parser::ClassifiedTx,
     slot_height: u64,
     slot_timestamp: DateTime<Utc>,
 ) -> Result<(), IndexerError> {
-    // Sender side. Some IndexerTx variants don't expose a sender
-    // (Unknown), in which case skip rather than back the tx out.
-    if let IndexerTx::Transfer(t) = &classified.kind {
+    // Resolve the sender address per-kind. None for `Unknown` since
+    // the chain elides the body and we have no event-side evidence.
+    let sender: Option<&str> = match &classified.kind {
+        IndexerTx::Transfer(t) => Some(t.from.as_str()),
+        IndexerTx::RegisterAttestorSet(d) => Some(d.registered_by.as_str()),
+        IndexerTx::RegisterSchema(d) => Some(d.owner.as_str()),
+        IndexerTx::SubmitAttestation(d) => Some(d.submitter.as_str()),
+        IndexerTx::Unknown { .. } => None,
+    };
+
+    if let Some(addr) = sender {
         db::upsert_address_activity(
             pool,
-            &t.from,
+            addr,
             AddressRole::Sender,
             slot_height,
             &classified.hash,
             slot_timestamp,
         )
         .await?;
-        // Receiver side. Only Transfer has a meaningful recipient.
+    }
+
+    // Receiver side. Only Transfer has a meaningful recipient.
+    if let IndexerTx::Transfer(t) = &classified.kind {
         db::upsert_address_activity(
             pool,
             &t.to,
@@ -315,5 +415,6 @@ async fn update_address_summaries(
         )
         .await?;
     }
+
     Ok(())
 }

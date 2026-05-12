@@ -35,10 +35,20 @@
 //!   weren't actually applied; storing them would create misleading
 //!   activity history)
 
-use ligate_api_types::{BankTokenTransferredEvent, LedgerEvent, LedgerTx};
+use ligate_api_types::{
+    AttestationAttestationSubmittedEvent, AttestationAttestorSetRegisteredEvent,
+    AttestationSchemaRegisteredEvent, BankTokenTransferredEvent, LedgerEvent, LedgerTx,
+};
 
 /// Event-key constant for the Bank module's `TokenTransferred` event.
 const KEY_BANK_TOKEN_TRANSFERRED: &str = "Bank/TokenTransferred";
+
+/// Event keys emitted by the Attestation module's three CallMessage
+/// paths (ligate-chain PR #297). The strings match the auto-generated
+/// `"<Module>/<VariantName>"` form the SDK's `emit_event` produces.
+const KEY_ATTESTATION_ATTESTOR_SET_REGISTERED: &str = "Attestation/AttestorSetRegistered";
+const KEY_ATTESTATION_SCHEMA_REGISTERED: &str = "Attestation/SchemaRegistered";
+const KEY_ATTESTATION_ATTESTATION_SUBMITTED: &str = "Attestation/AttestationSubmitted";
 
 /// Tx outcome from the chain receipt's `result` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +85,15 @@ pub fn outcome_of(receipt_result: &str) -> TxOutcome {
 pub enum IndexerTx {
     /// `Bank/TokenTransferred`.
     Transfer(IndexerTransfer),
+    /// `Attestation/AttestorSetRegistered`. Mirrors RFC 0002's
+    /// `details` shape for `kind = "register_attestor_set"`.
+    RegisterAttestorSet(IndexerRegisterAttestorSet),
+    /// `Attestation/SchemaRegistered`. Mirrors RFC 0002's `details`
+    /// shape for `kind = "register_schema"`.
+    RegisterSchema(IndexerRegisterSchema),
+    /// `Attestation/AttestationSubmitted`. Mirrors RFC 0002's
+    /// `details` shape for `kind = "submit_attestation"`.
+    SubmitAttestation(IndexerSubmitAttestation),
     /// Catch-all. Either no events were emitted (e.g. a no-op tx), or
     /// the events present don't match any kind the parser knows. The
     /// indexer writes this as `kind = "unknown"` with the raw event
@@ -94,6 +113,58 @@ pub struct IndexerTransfer {
     pub amount_nano: String,
     /// Bech32m token id (`token_1...`).
     pub token_id: String,
+}
+
+/// Decoded `register_attestor_set` details. Drives both the
+/// `transactions.details` JSONB and the `attestor_sets` row insert
+/// downstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexerRegisterAttestorSet {
+    /// Bech32m `las1...` deterministic id.
+    pub attestor_set_id: String,
+    /// Member pubkeys (bech32m `lpk1...`), post-canonicalisation order.
+    pub members: Vec<String>,
+    /// M-of-N threshold.
+    pub threshold: u8,
+    /// Tx sender (paid the registration fee). Bech32m `lig1...`.
+    pub registered_by: String,
+}
+
+/// Decoded `register_schema` details. Carries every column the
+/// `schemas` table requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexerRegisterSchema {
+    /// Bech32m `lsc1...` deterministic id.
+    pub schema_id: String,
+    /// Schema name (e.g. `themisra.proof-of-prompt`).
+    pub name: String,
+    /// Schema version (monotonic per name+owner).
+    pub version: u32,
+    /// Owner address (bech32m `lig1...`).
+    pub owner: String,
+    /// Bound attestor set id (bech32m `las1...`).
+    pub attestor_set_id: String,
+    /// Fee-routing share in basis points.
+    pub fee_routing_bps: u16,
+    /// Destination address for the routed share. `None` iff bps == 0.
+    pub fee_routing_addr: Option<String>,
+    /// SHA-256 of canonical schema-doc bytes. Stringified from
+    /// whichever serialisation the chain emitted (typically hex with
+    /// or without `0x`; bech32m wrap later possible).
+    pub payload_shape_hash: String,
+}
+
+/// Decoded `submit_attestation` details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexerSubmitAttestation {
+    /// Schema id (bech32m `lsc1...`).
+    pub schema_id: String,
+    /// Payload hash (bech32m `lph1...`).
+    pub payload_hash: String,
+    /// Submitter address (bech32m `lig1...`).
+    pub submitter: String,
+    /// Number of signatures included with the submission.
+    pub signature_count: u32,
 }
 
 /// Classify a `LedgerTx` plus its emitted events into an [`IndexerTx`].
@@ -184,9 +255,81 @@ pub struct ClassifiedTx {
 /// Order of preference (first match wins):
 ///
 /// 1. `Bank/TokenTransferred` -> [`IndexerTx::Transfer`]
-/// 2. otherwise -> [`IndexerTx::Unknown`] capturing the event keys
+/// 2. `Attestation/AttestorSetRegistered` -> [`IndexerTx::RegisterAttestorSet`]
+/// 3. `Attestation/SchemaRegistered`      -> [`IndexerTx::RegisterSchema`]
+/// 4. `Attestation/AttestationSubmitted`  -> [`IndexerTx::SubmitAttestation`]
+/// 5. otherwise -> [`IndexerTx::Unknown`] capturing the event keys
 ///    we saw, for forensic lookup
+///
+/// **Attestation events win over Bank events.** A `register_schema`
+/// tx emits both an `Attestation/SchemaRegistered` (semantic) and a
+/// `Bank/TokenTransferred` (the fee payment to treasury); without
+/// this preference the parser would classify the tx as a Transfer
+/// of the fee, dropping the semantic event. We walk events looking
+/// for an Attestation-module key first; only if none is found do we
+/// fall through to the bank check.
 fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
+    // Pass 1: look for an Attestation-module event. These are the
+    // semantic events for the register/submit call types.
+    for ev in events {
+        match ev.key.as_str() {
+            KEY_ATTESTATION_ATTESTOR_SET_REGISTERED => {
+                if let Ok(payload) = serde_json::from_value::<AttestationAttestorSetRegisteredEvent>(
+                    ev.value.clone(),
+                ) {
+                    let d = payload.attestor_set_registered;
+                    return IndexerTx::RegisterAttestorSet(IndexerRegisterAttestorSet {
+                        attestor_set_id: d.attestor_set_id,
+                        members: d.members,
+                        threshold: d.threshold,
+                        registered_by: d.registered_by.user,
+                    });
+                }
+            }
+            KEY_ATTESTATION_SCHEMA_REGISTERED => {
+                if let Ok(payload) =
+                    serde_json::from_value::<AttestationSchemaRegisteredEvent>(ev.value.clone())
+                {
+                    let d = payload.schema_registered;
+                    return IndexerTx::RegisterSchema(IndexerRegisterSchema {
+                        schema_id: d.schema_id,
+                        name: d.name,
+                        version: d.version,
+                        owner: d.owner.user,
+                        attestor_set_id: d.attestor_set_id,
+                        fee_routing_bps: d.fee_routing_bps,
+                        fee_routing_addr: d.fee_routing_addr.map(|a| a.user),
+                        // `payload_shape_hash` is `Value` in the typed
+                        // event payload (chain serialisation form
+                        // varies across revs); stringify-then-strip
+                        // surrounding quotes if it's already a string,
+                        // or fall back to the JSON repr.
+                        payload_shape_hash: match d.payload_shape_hash {
+                            serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        },
+                    });
+                }
+            }
+            KEY_ATTESTATION_ATTESTATION_SUBMITTED => {
+                if let Ok(payload) =
+                    serde_json::from_value::<AttestationAttestationSubmittedEvent>(ev.value.clone())
+                {
+                    let d = payload.attestation_submitted;
+                    return IndexerTx::SubmitAttestation(IndexerSubmitAttestation {
+                        schema_id: d.schema_id,
+                        payload_hash: d.payload_hash,
+                        submitter: d.submitter.user,
+                        signature_count: d.signature_count,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Pass 2: no semantic event matched; fall back to the bank check
+    // for plain transfers.
     for ev in events {
         if ev.key == KEY_BANK_TOKEN_TRANSFERRED {
             // The serde_json::from_value path picks up the typed shape
@@ -297,31 +440,193 @@ mod tests {
                     "token_1nyl0e0yweragfsatygt24zmd8jrr2vqtvdfptzjhxkguz2xxx3vs0y07u7"
                 );
             }
-            IndexerTx::Unknown { .. } => panic!("expected Transfer, got Unknown"),
+            other => panic!("expected Transfer, got {other:?}"),
         }
     }
 
     #[test]
     fn classify_falls_back_to_unknown_for_unrecognised_events() {
+        // Use a future / typo'd module key so the parser has no
+        // typed handler — confirms the catch-all path still surfaces
+        // event keys for forensics.
         let event = LedgerEvent {
             r#type: "event".into(),
             number: 1,
-            key: "Attestation/AttestorSetRegistered".into(),
-            value: serde_json::json!({"attestor_set_registered": {}}),
+            key: "Future/SomethingNew".into(),
+            value: serde_json::json!({"some_payload": {}}),
             module: ligate_api_types::ModuleRef {
                 r#type: "moduleRef".into(),
-                name: "Attestation".into(),
+                name: "Future".into(),
             },
-            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(), // synthetic bech32m fixture, format-opaque to parser
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
         };
         let tx = fixture_tx("successful");
         let classified = classify_tx(&tx, &[&event]).expect("not skipped");
         match classified.kind {
             IndexerTx::Unknown { event_keys } => {
-                assert_eq!(event_keys, vec!["Attestation/AttestorSetRegistered"]);
+                assert_eq!(event_keys, vec!["Future/SomethingNew"]);
             }
             other => panic!("expected Unknown, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn classify_recognises_attestor_set_registered() {
+        // Mirrors the shape `Attestation/AttestorSetRegistered`
+        // serialises to via the chain's serde-default external
+        // tagging: `{"attestor_set_registered": { ... }}`.
+        let event = LedgerEvent {
+            r#type: "event".into(),
+            number: 1,
+            key: "Attestation/AttestorSetRegistered".into(),
+            value: serde_json::json!({
+                "attestor_set_registered": {
+                    "attestor_set_id": "las1abc",
+                    "members": ["lpk1m1", "lpk1m2"],
+                    "threshold": 2,
+                    "registered_by": {"user": "lig1registrar"}
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Attestation".into(),
+            },
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
+        };
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::RegisterAttestorSet(d) => {
+                assert_eq!(d.attestor_set_id, "las1abc");
+                assert_eq!(d.members, vec!["lpk1m1", "lpk1m2"]);
+                assert_eq!(d.threshold, 2);
+                assert_eq!(d.registered_by, "lig1registrar");
+            }
+            other => panic!("expected RegisterAttestorSet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_schema_registered() {
+        let event = LedgerEvent {
+            r#type: "event".into(),
+            number: 1,
+            key: "Attestation/SchemaRegistered".into(),
+            value: serde_json::json!({
+                "schema_registered": {
+                    "schema_id": "lsc1abc",
+                    "name": "themisra.proof-of-prompt",
+                    "version": 1,
+                    "owner": {"user": "lig1owner"},
+                    "attestor_set_id": "las1abc",
+                    "fee_routing_bps": 0,
+                    "fee_routing_addr": null,
+                    "payload_shape_hash": "0xdeadbeef"
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Attestation".into(),
+            },
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
+        };
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::RegisterSchema(d) => {
+                assert_eq!(d.schema_id, "lsc1abc");
+                assert_eq!(d.name, "themisra.proof-of-prompt");
+                assert_eq!(d.version, 1);
+                assert_eq!(d.owner, "lig1owner");
+                assert_eq!(d.attestor_set_id, "las1abc");
+                assert_eq!(d.fee_routing_bps, 0);
+                assert!(d.fee_routing_addr.is_none());
+                assert_eq!(d.payload_shape_hash, "0xdeadbeef");
+            }
+            other => panic!("expected RegisterSchema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_attestation_submitted() {
+        let event = LedgerEvent {
+            r#type: "event".into(),
+            number: 1,
+            key: "Attestation/AttestationSubmitted".into(),
+            value: serde_json::json!({
+                "attestation_submitted": {
+                    "schema_id": "lsc1abc",
+                    "payload_hash": "lph1abc",
+                    "submitter": {"user": "lig1submitter"},
+                    "signature_count": 3
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Attestation".into(),
+            },
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
+        };
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::SubmitAttestation(d) => {
+                assert_eq!(d.schema_id, "lsc1abc");
+                assert_eq!(d.payload_hash, "lph1abc");
+                assert_eq!(d.submitter, "lig1submitter");
+                assert_eq!(d.signature_count, 3);
+            }
+            other => panic!("expected SubmitAttestation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attestation_event_wins_over_bank_fee_transfer() {
+        // A register_schema tx emits BOTH the SchemaRegistered event
+        // AND a Bank/TokenTransferred for the fee payment. The parser
+        // must pick the semantic event, not the fee transfer.
+        let semantic = LedgerEvent {
+            r#type: "event".into(),
+            number: 1,
+            key: "Attestation/SchemaRegistered".into(),
+            value: serde_json::json!({
+                "schema_registered": {
+                    "schema_id": "lsc1abc",
+                    "name": "x",
+                    "version": 1,
+                    "owner": {"user": "lig1owner"},
+                    "attestor_set_id": "las1abc",
+                    "fee_routing_bps": 0,
+                    "fee_routing_addr": null,
+                    "payload_shape_hash": "0x00"
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Attestation".into(),
+            },
+            tx_hash: "ltx1abc".into(),
+        };
+        let fee = LedgerEvent {
+            r#type: "event".into(),
+            number: 2,
+            key: KEY_BANK_TOKEN_TRANSFERRED.into(),
+            value: serde_json::json!({
+                "token_transferred": {
+                    "from": {"user": "lig1owner"},
+                    "to":   {"user": "lig1treasury"},
+                    "coins": {"amount": "100", "token_id": "token_1lgt"}
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Bank".into(),
+            },
+            tx_hash: "ltx1abc".into(),
+        };
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&semantic, &fee]).expect("not skipped");
+        assert!(matches!(classified.kind, IndexerTx::RegisterSchema(_)));
     }
 
     #[test]
@@ -343,9 +648,7 @@ mod tests {
             IndexerTx::Transfer(t) => {
                 assert_eq!(t.amount_nano, "1000000000");
             }
-            IndexerTx::Unknown { event_keys } => {
-                panic!("expected Transfer, got Unknown with keys {event_keys:?}")
-            }
+            other => panic!("expected Transfer, got {other:?}"),
         }
     }
 }
