@@ -310,6 +310,221 @@ pub async fn txs_page(
     Ok(rows.into_iter().map(tx_row_from_tuple).collect())
 }
 
+// ---- schemas ---------------------------------------------------------------
+//
+// `/v1/schemas` (list) and `/v1/schemas/{id}` (single). All reads
+// here only consult the `schemas` table — the registering tx's hash
+// is already denormalised onto each row at insert time, so the
+// `registered_at_*` fields don't need a join.
+
+/// One row of `schemas`. Handler maps to [`crate::responses::SchemaResponse`].
+#[derive(Debug)]
+pub struct SchemaRow {
+    pub id: String,
+    pub name: String,
+    pub version: i32,
+    pub owner: String,
+    pub attestor_set_id: String,
+    pub fee_routing_bps: i32,
+    pub fee_routing_addr: Option<String>,
+    pub payload_shape_hash: String,
+    pub registered_at_slot: i64,
+    pub registered_at_tx: String,
+    pub registered_at_timestamp: DateTime<Utc>,
+    pub attestation_count: i32,
+}
+
+/// Read one schema by id (`lsc1...`). `None` if not yet indexed.
+pub async fn schema_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<SchemaRow>> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            i32,
+            String,
+            String,
+            i32,
+            Option<String>,
+            String,
+            i64,
+            String,
+            DateTime<Utc>,
+            i32,
+        ),
+    >(
+        "SELECT id, name, version, owner, attestor_set_id, fee_routing_bps,
+                fee_routing_addr, payload_shape_hash,
+                registered_at_slot, registered_at_tx, registered_at_timestamp,
+                attestation_count
+         FROM schemas
+         WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(schema_row_from_tuple))
+}
+
+/// Cursor shape for `/v1/schemas` (compound: (registered_at_slot
+/// DESC, id DESC)). Decoupling slot from id breaks ties when two
+/// schemas register in the same slot.
+pub struct SchemasCursor {
+    pub registered_at_slot: i64,
+    pub id: String,
+}
+
+/// Read a page of schemas, descending by (registered_at_slot, id).
+pub async fn schemas_page(
+    pool: &PgPool,
+    before: Option<SchemasCursor>,
+    limit_plus_one: i64,
+) -> sqlx::Result<Vec<SchemaRow>> {
+    let rows = match before {
+        Some(c) => {
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    i32,
+                    String,
+                    String,
+                    i32,
+                    Option<String>,
+                    String,
+                    i64,
+                    String,
+                    DateTime<Utc>,
+                    i32,
+                ),
+            >(
+                "SELECT id, name, version, owner, attestor_set_id, fee_routing_bps,
+                        fee_routing_addr, payload_shape_hash,
+                        registered_at_slot, registered_at_tx, registered_at_timestamp,
+                        attestation_count
+                 FROM schemas
+                 WHERE (registered_at_slot, id) < ($1, $2)
+                 ORDER BY registered_at_slot DESC, id DESC
+                 LIMIT $3",
+            )
+            .bind(c.registered_at_slot)
+            .bind(&c.id)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    i32,
+                    String,
+                    String,
+                    i32,
+                    Option<String>,
+                    String,
+                    i64,
+                    String,
+                    DateTime<Utc>,
+                    i32,
+                ),
+            >(
+                "SELECT id, name, version, owner, attestor_set_id, fee_routing_bps,
+                        fee_routing_addr, payload_shape_hash,
+                        registered_at_slot, registered_at_tx, registered_at_timestamp,
+                        attestation_count
+                 FROM schemas
+                 ORDER BY registered_at_slot DESC, id DESC
+                 LIMIT $1",
+            )
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    Ok(rows.into_iter().map(schema_row_from_tuple).collect())
+}
+
+#[allow(clippy::type_complexity)]
+fn schema_row_from_tuple(
+    t: (
+        String,
+        String,
+        i32,
+        String,
+        String,
+        i32,
+        Option<String>,
+        String,
+        i64,
+        String,
+        DateTime<Utc>,
+        i32,
+    ),
+) -> SchemaRow {
+    SchemaRow {
+        id: t.0,
+        name: t.1,
+        version: t.2,
+        owner: t.3,
+        attestor_set_id: t.4,
+        fee_routing_bps: t.5,
+        fee_routing_addr: t.6,
+        payload_shape_hash: t.7,
+        registered_at_slot: t.8,
+        registered_at_tx: t.9,
+        registered_at_timestamp: t.10,
+        attestation_count: t.11,
+    }
+}
+
+// ---- attestor_sets ---------------------------------------------------------
+
+/// One row of `attestor_sets`. Handler maps to
+/// [`crate::responses::AttestorSetResponse`].
+#[derive(Debug)]
+pub struct AttestorSetRow {
+    pub id: String,
+    /// JSONB array of bech32m `lpk1...` member strings. Stays as
+    /// `Value` here so the handler can pass it through without a
+    /// per-row vec allocation.
+    pub members: Value,
+    pub threshold: i32,
+    pub registered_at_slot: i64,
+    pub registered_at_tx: String,
+    pub registered_at_timestamp: DateTime<Utc>,
+    pub schema_count: i32,
+}
+
+/// Read one attestor set by id (`las1...`). `None` if not yet indexed.
+pub async fn attestor_set_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<AttestorSetRow>> {
+    let row = sqlx::query_as::<_, (String, Value, i32, i64, String, DateTime<Utc>, i32)>(
+        "SELECT id, members, threshold,
+                registered_at_slot, registered_at_tx, registered_at_timestamp,
+                schema_count
+         FROM attestor_sets
+         WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|t| AttestorSetRow {
+        id: t.0,
+        members: t.1,
+        threshold: t.2,
+        registered_at_slot: t.3,
+        registered_at_tx: t.4,
+        registered_at_timestamp: t.5,
+        schema_count: t.6,
+    }))
+}
+
 // ---- address_summaries -----------------------------------------------------
 
 /// One row of `address_summaries`, mapped to a Rust shape. The

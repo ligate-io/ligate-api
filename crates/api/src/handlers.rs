@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 use crate::cursor;
 use crate::queries;
 use crate::responses::{
-    AddressSummaryResponse, BlockResponse, InfoResponse, Page, Pagination, SeenAtResponse,
-    TxResponse,
+    AddressSummaryResponse, AttestorSetResponse, BlockResponse, InfoResponse, Page, Pagination,
+    RegisteredAtResponse, SchemaResponse, SeenAtResponse, TxResponse,
 };
 use crate::AppState;
 
@@ -42,6 +42,16 @@ struct BlocksCursor {
 struct TxsCursor {
     slot: u64,
     idx: u32,
+}
+
+/// Cursor shape for `/v1/schemas` (compound: descending by
+/// (registered_at_slot, id)). RFC 0001 documents `{"id": "lsc1..."}`
+/// as the schemas cursor; the compound form is a strict superset
+/// — the wire shape just carries the slot tiebreaker too.
+#[derive(Debug, Serialize, Deserialize)]
+struct SchemasCursor {
+    slot: u64,
+    id: String,
 }
 
 // ---- Operator probes -------------------------------------------------------
@@ -534,35 +544,160 @@ pub async fn address_summary(
     .into_response()
 }
 
+/// `GET /v1/schemas` — descending list of registered schemas with
+/// compound cursor pagination.
+///
+/// Reads from `schemas`, ordered by `(registered_at_slot DESC, id
+/// DESC)`. Cursor encodes the last row's `(slot, id)`.
 pub async fn schemas_list(
-    State(_state): State<AppState>,
-    Query(_params): Query<PaginationParams>,
+    State(state): State<AppState>,
+    Query(params): Query<PaginationParams>,
 ) -> impl IntoResponse {
-    not_implemented("/v1/schemas list")
+    let limit = cursor::resolve_limit(params.limit);
+    let before = params
+        .before
+        .as_deref()
+        .and_then(cursor::decode::<SchemasCursor>)
+        .map(|c| queries::SchemasCursor {
+            registered_at_slot: c.slot as i64,
+            id: c.id,
+        });
+
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows = match queries::schemas_page(&state.pg, before, limit_plus_one).await {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(error = %e, "schemas_page in /v1/schemas");
+            return internal_error();
+        }
+    };
+
+    let has_more = rows.len() as i64 > limit as i64;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+
+    let next = if has_more {
+        rows.last().and_then(|r| {
+            cursor::encode(&SchemasCursor {
+                slot: r.registered_at_slot as u64,
+                id: r.id.clone(),
+            })
+            .ok()
+        })
+    } else {
+        None
+    };
+
+    let data: Vec<SchemaResponse> = rows.into_iter().map(schema_row_to_response).collect();
+
+    Json(Page {
+        data,
+        pagination: Pagination { next, limit },
+    })
+    .into_response()
 }
 
+/// `GET /v1/schemas/{id}` — a single schema by bech32m `lsc1...` id.
 pub async fn schema_by_id(
-    State(_state): State<AppState>,
-    Path(_id): Path<String>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    not_implemented("/v1/schemas/{id}")
+    let row = match queries::schema_by_id(&state.pg, &id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "schema not found",
+                    "tracking": null
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, %id, "schema_by_id");
+            return internal_error();
+        }
+    };
+
+    Json(schema_row_to_response(row)).into_response()
 }
 
+/// `GET /v1/attestor-sets/{id}` — a single attestor set by bech32m
+/// `las1...` id.
 pub async fn attestor_set_by_id(
-    State(_state): State<AppState>,
-    Path(_id): Path<String>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    not_implemented("/v1/attestor-sets/{id}")
+    let row = match queries::attestor_set_by_id(&state.pg, &id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "attestor set not found",
+                    "tracking": null
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, %id, "attestor_set_by_id");
+            return internal_error();
+        }
+    };
+
+    // members is JSONB array of strings; pull out the typed Vec for
+    // the wire shape. Defensive against malformed rows: drop the
+    // payload to an empty list rather than crash.
+    let members: Vec<String> = match row.members {
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .filter_map(|v| match v {
+                serde_json::Value::String(s) => Some(s),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    Json(AttestorSetResponse {
+        id: row.id,
+        members,
+        threshold: row.threshold as u8,
+        registered_at: RegisteredAtResponse {
+            block_height: row.registered_at_slot as u64,
+            tx_hash: row.registered_at_tx,
+            timestamp: row
+                .registered_at_timestamp
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+        },
+        schema_count: row.schema_count as u32,
+    })
+    .into_response()
 }
 
-fn not_implemented(endpoint: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": format!("{endpoint} is not implemented yet"),
-            "tracking": "https://github.com/ligate-io/ligate-api/issues/1"
-        })),
-    )
+/// Map a `schemas` row to the RFC 0002 wire shape.
+fn schema_row_to_response(row: queries::SchemaRow) -> SchemaResponse {
+    SchemaResponse {
+        id: row.id,
+        name: row.name,
+        version: row.version as u32,
+        owner: row.owner,
+        attestor_set_id: row.attestor_set_id,
+        fee_routing_bps: row.fee_routing_bps as u16,
+        fee_routing_addr: row.fee_routing_addr,
+        payload_shape_hash: row.payload_shape_hash,
+        registered_at: RegisteredAtResponse {
+            block_height: row.registered_at_slot as u64,
+            tx_hash: row.registered_at_tx,
+            timestamp: row
+                .registered_at_timestamp
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+        },
+        attestation_count: row.attestation_count as u32,
+    }
 }
 
 // ---- helpers ---------------------------------------------------------------
