@@ -32,7 +32,6 @@ use anyhow::{Context, Result};
 use ligate_client::submit::Submitter;
 use ligate_rollup::MockRollupSpec;
 use ligate_stf::runtime::RuntimeCall;
-use serde::Deserialize;
 use sov_bank::{Amount, CallMessage as BankCall, Coins, TokenId};
 use sov_modules_api::capabilities::UniquenessData;
 use sov_modules_api::execution_mode::Native;
@@ -159,9 +158,10 @@ impl Signer {
     ///
     /// - `Some(n)`: use `n` verbatim, skip the chain query. For
     ///   offline boots or recovery from a wedged uniqueness state.
-    /// - `None`: query the chain for the current nonce and use that.
-    ///   The right default. Survives Railway redeploys without the
-    ///   operator having to bump `DRIP_STARTING_NONCE` every time.
+    /// - `None`: query the chain via `Submitter::get_nonce_for_public_key`
+    ///   and use that. The right default. Survives Railway redeploys
+    ///   without the operator having to bump `DRIP_STARTING_NONCE`
+    ///   every time.
     ///
     /// Returns `(signer, resolved_nonce)` so the caller can log which
     /// nonce was actually used at boot.
@@ -184,7 +184,12 @@ impl Signer {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
         let resolved = match starting_nonce_override {
             Some(n) => n,
-            None => fetch_account_nonce(&signer.submitter, &signer.private_key.pub_key()).await?,
+            None => signer
+                .submitter
+                .inner()
+                .get_nonce_for_public_key::<S>(&signer.private_key.pub_key())
+                .await
+                .context("fetching on-chain nonce at signer init")?,
         };
         signer.nonce.store(resolved, Ordering::SeqCst);
         Ok((signer, resolved))
@@ -355,44 +360,6 @@ impl Signer {
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     }
-}
-
-/// Fetch the next-to-use nonce for `pub_key` directly off the chain's
-/// `/modules/uniqueness/state/nonces/items/{credential_id}` endpoint.
-///
-/// Workaround for the in-house SDK fork's broken
-/// `NodeClient::get_nonce_for_public_key`. The SDK targets
-/// `/modules/nonces/...` (the upstream module name) but the fork
-/// renamed the module to `sov-uniqueness`, which is exposed at
-/// `/modules/uniqueness/...`. The 404 the SDK gets back is silently
-/// mapped to nonce=0 by `error_for_status`, so any account that's sent
-/// more than one tx then hits `Tx bad nonce: expected: N, but found: 0`.
-///
-/// Tracked in `ligate-io/sovereign-sdk#TBD`; remove this helper once
-/// the fork's path is corrected and ligate-chain bumps its fork pin.
-pub async fn fetch_account_nonce(
-    submitter: &Submitter,
-    pub_key: &<<S as Spec>::CryptoSpec as CryptoSpec>::PublicKey,
-) -> Result<u64, anyhow::Error> {
-    let cred_id = pub_key.credential_id();
-    let path = format!("/modules/uniqueness/state/nonces/items/{cred_id}");
-    let body = submitter
-        .inner()
-        .http_get(&path)
-        .await
-        .with_context(|| format!("fetching account nonce via {path}"))?;
-    // `http_get` returns `Ok("")` on 404 (chain returns 404 for accounts
-    // that have never sent a tx). Treat empty body as nonce=0.
-    if body.trim().is_empty() {
-        return Ok(0);
-    }
-    #[derive(Deserialize)]
-    struct NonceResp {
-        value: u64,
-    }
-    let resp: NonceResp = serde_json::from_str(&body)
-        .with_context(|| format!("parsing nonce response body: {body}"))?;
-    Ok(resp.value)
 }
 
 #[cfg(test)]
