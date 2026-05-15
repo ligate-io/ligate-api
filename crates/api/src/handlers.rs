@@ -1067,8 +1067,8 @@ pub struct SearchParams {
 /// - `lsc1...`    → schema (resolved against `schemas.id`)
 /// - `las1...`    → attestor set (resolved against `attestor_sets.id`)
 /// - `lph1...`    → first attestation whose `payload_hash` matches
-///                  (returned as the `(schema_id, payload_hash)` pair
-///                  the explorer needs to deep-link)
+///   (returned as the `(schema_id, payload_hash)` pair
+///   the explorer needs to deep-link)
 ///
 /// Anything else, or a prefix that doesn't resolve to an indexed row,
 /// returns `{ "kind": "not_found", "query": "<echoed>" }` with HTTP

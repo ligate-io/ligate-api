@@ -838,6 +838,7 @@ pub async fn attestation_by_pair(
     schema_id: &str,
     payload_hash: &str,
 ) -> sqlx::Result<Option<AttestationRow>> {
+    #[allow(clippy::type_complexity)]
     let row: Option<(
         String,
         String,
@@ -903,6 +904,7 @@ pub async fn attestor_sets_page(
     before: Option<AttestorSetsCursor>,
     limit_plus_one: i64,
 ) -> sqlx::Result<Vec<AttestorSetRow>> {
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(String, Value, i32, i64, String, DateTime<Utc>, i32)> = match before {
         Some(c) => {
             sqlx::query_as(
