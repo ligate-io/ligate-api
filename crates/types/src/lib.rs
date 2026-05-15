@@ -454,14 +454,29 @@ pub struct MultiAddress {
 // `crates/modules/attestation/src/lib.rs::AttestationEvent` payload
 // shapes for indexing. Chain-side spec lives in ligate-chain PR #297.
 
-/// Payload of `Attestation/AttestorSetRegistered`.
+/// Payload of `AttestationModule/AttestorSetRegistered`.
+///
+/// **Wire format note.** The chain's emitted event has the variant
+/// name in PascalCase as the outer JSON key (serde's default
+/// externally-tagged enum encoding for the chain's
+/// `AttestationEvent::AttestorSetRegistered { ... }` variant). The
+/// `#[serde(rename)]` here decouples the Rust field name from the
+/// wire name so the descriptive `attestor_set_registered` accessor
+/// pattern in the parser stays readable.
+///
+/// The address fields inside (`registered_by`, etc.) are emitted as
+/// **raw bech32m strings**, NOT the `{"user": "lig1..."}` wrapper
+/// the bank module still uses. The two modules currently disagree on
+/// `MultiAddress` serialization; we match each event's actual shape
+/// rather than imposing one wrapper. If the chain unifies them later,
+/// this is where to track the change.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttestationAttestorSetRegisteredEvent {
-    /// External tag, serde's default for `enum::AttestorSetRegistered { ... }`.
+    #[serde(rename = "AttestorSetRegistered")]
     pub attestor_set_registered: AttestorSetRegisteredDetails,
 }
 
-/// Inner fields of `Attestation/AttestorSetRegistered`.
+/// Inner fields of `AttestationModule/AttestorSetRegistered`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttestorSetRegisteredDetails {
     /// Bech32m `las1...` deterministic id.
@@ -470,18 +485,20 @@ pub struct AttestorSetRegisteredDetails {
     pub members: Vec<String>,
     /// M-of-N threshold.
     pub threshold: u8,
-    /// Address that paid the registration fee.
-    pub registered_by: MultiAddress,
+    /// Address that paid the registration fee. Raw bech32m `lig1...`
+    /// string (NOT wrapped in `{"user": ...}` — see top-level
+    /// docstring for the chain-side rationale).
+    pub registered_by: String,
 }
 
-/// Payload of `Attestation/SchemaRegistered`.
+/// Payload of `AttestationModule/SchemaRegistered`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttestationSchemaRegisteredEvent {
-    /// External tag.
+    #[serde(rename = "SchemaRegistered")]
     pub schema_registered: SchemaRegisteredDetails,
 }
 
-/// Inner fields of `Attestation/SchemaRegistered`.
+/// Inner fields of `AttestationModule/SchemaRegistered`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SchemaRegisteredDetails {
     /// Bech32m `lsc1...` deterministic id.
@@ -490,16 +507,16 @@ pub struct SchemaRegisteredDetails {
     pub name: String,
     /// Schema version (monotonic per name+owner).
     pub version: u32,
-    /// Owner address — receives schema-routed fees.
-    pub owner: MultiAddress,
+    /// Owner address — receives schema-routed fees. Raw bech32m string.
+    pub owner: String,
     /// Bound attestor set id (bech32m `las1...`).
     pub attestor_set_id: String,
     /// Fee-routing share in basis points (0..=cap).
     pub fee_routing_bps: u16,
     /// Destination address for the routed share. `None` iff
-    /// `fee_routing_bps == 0`.
+    /// `fee_routing_bps == 0`. Raw bech32m string.
     #[serde(default)]
-    pub fee_routing_addr: Option<MultiAddress>,
+    pub fee_routing_addr: Option<String>,
     /// SHA-256 of the canonical schema-doc bytes. Chain serialises
     /// the `[u8; 32]` as a hex string (with or without `0x` prefix
     /// depending on the chain rev). Kept as `serde_json::Value` so
@@ -508,22 +525,22 @@ pub struct SchemaRegisteredDetails {
     pub payload_shape_hash: Value,
 }
 
-/// Payload of `Attestation/AttestationSubmitted`.
+/// Payload of `AttestationModule/AttestationSubmitted`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttestationAttestationSubmittedEvent {
-    /// External tag.
+    #[serde(rename = "AttestationSubmitted")]
     pub attestation_submitted: AttestationSubmittedDetails,
 }
 
-/// Inner fields of `Attestation/AttestationSubmitted`.
+/// Inner fields of `AttestationModule/AttestationSubmitted`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttestationSubmittedDetails {
     /// Bech32m `lsc1...` schema id.
     pub schema_id: String,
     /// Bech32m `lph1...` payload hash.
     pub payload_hash: String,
-    /// Submitter address (paid the attestation fee).
-    pub submitter: MultiAddress,
+    /// Submitter address (paid the attestation fee). Raw bech32m string.
+    pub submitter: String,
     /// Number of attestor signatures included.
     pub signature_count: u32,
 }
