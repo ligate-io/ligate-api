@@ -38,10 +38,18 @@ RUN mkdir -p crates/api/src crates/drip/src crates/indexer/src crates/types/src 
 
 COPY crates ./crates
 COPY migrations ./migrations
+# Invalidate the cached stub-binary artifacts from the previous RUN
+# (deps + dep-build remain in target/release/, only ligate-api itself
+# is cleaned). Without this, `cargo build` short-circuits on the
+# 332KB `fn main() {}` stub from the earlier layer and never picks up
+# the real sources copied in above -- producing a "success build"
+# that ships a stub that exits immediately on Railway.
+RUN cargo clean -p ligate-api -p ligate-api-drip -p ligate-api-indexer -p ligate-api-types || true
 RUN SKIP_GUEST_BUILD=1 RISC0_SKIP_BUILD_KERNELS=1 \
     CONSTANTS_MANIFEST_PATH=/build/constants.toml \
     cargo build --release --bin ligate-api && \
-    strip target/release/ligate-api
+    strip target/release/ligate-api && \
+    ls -lh target/release/ligate-api
 
 # Stage 2: minimal runtime — glibc + ca-certificates + the binary.
 FROM debian:bookworm-slim AS runtime
