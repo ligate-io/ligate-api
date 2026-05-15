@@ -25,8 +25,9 @@ use serde::{Deserialize, Serialize};
 use crate::cursor;
 use crate::queries;
 use crate::responses::{
-    AddressSummaryResponse, AttestorSetResponse, BlockResponse, InfoResponse, Page, Pagination,
-    RegisteredAtResponse, SchemaResponse, SeenAtResponse, TxResponse,
+    AddressSummaryResponse, AttestationResponse, AttestorSetResponse, BlockResponse, InfoResponse,
+    Page, Pagination, RegisteredAtResponse, SchemaResponse, SearchResponse, SeenAtResponse,
+    TxResponse,
 };
 use crate::AppState;
 
@@ -782,4 +783,403 @@ fn schema_row_to_response(row: queries::SchemaRow) -> SchemaResponse {
 
 fn nano_to_lgt(nano: u128) -> f64 {
     (nano as f64) / 1_000_000_000.0
+}
+
+// ---- Attestations ----------------------------------------------------------
+
+/// Cursor shape for `/v1/attestations` and its filtered variants.
+/// Compound `(submitted_at_slot, schema_id, payload_hash)` so the
+/// tiebreaker rule matches the SQL `ORDER BY` exactly.
+#[derive(Debug, Serialize, Deserialize)]
+struct AttestationsCursor {
+    slot: u64,
+    schema_id: String,
+    payload_hash: String,
+}
+
+/// `GET /v1/attestations` — paginated list, newest first.
+///
+/// Ordered by `(submitted_at_slot DESC, schema_id DESC, payload_hash
+/// DESC)`. Cursor encodes the last row's `(slot, schema_id,
+/// payload_hash)`. Same pagination semantics as `/v1/blocks`,
+/// `/v1/txs`, `/v1/schemas` (RFC 0001).
+pub async fn attestations_list(
+    State(state): State<AppState>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let limit = cursor::resolve_limit(params.limit);
+    let before = decode_attestations_cursor(&params);
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows = match queries::attestations_page(&state.pg, None, before, limit_plus_one).await {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(error = %e, "attestations_page in /v1/attestations");
+            return internal_error();
+        }
+    };
+    Json(attestation_page_response(&mut rows, limit)).into_response()
+}
+
+/// `GET /v1/attestations/{id}` where `{id}` is the compound
+/// `<schemaId>:<payloadHash>` (both bech32m, colon-separated).
+pub async fn attestation_by_id(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let (schema_id, payload_hash) = match id.split_once(':') {
+        Some((s, p)) if !s.is_empty() && !p.is_empty() => (s.to_string(), p.to_string()),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error":
+                        "attestation id must be '<schemaId>:<payloadHash>' (lsc1...:lph1...)",
+                })),
+            )
+                .into_response();
+        }
+    };
+    match queries::attestation_by_pair(&state.pg, &schema_id, &payload_hash).await {
+        Ok(Some(row)) => Json(attestation_row_to_response(row)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "attestation not found",
+                "schema_id": schema_id,
+                "payload_hash": payload_hash,
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, %schema_id, %payload_hash, "attestation_by_pair");
+            internal_error()
+        }
+    }
+}
+
+/// `GET /v1/schemas/{id}/attestations` — attestations filtered to one
+/// schema id. Pagination is the same shape as `/v1/attestations`.
+pub async fn attestations_by_schema(
+    State(state): State<AppState>,
+    Path(schema_id): Path<String>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let limit = cursor::resolve_limit(params.limit);
+    let before = decode_attestations_cursor(&params);
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows =
+        match queries::attestations_page(&state.pg, Some(&schema_id), before, limit_plus_one).await
+        {
+            Ok(rs) => rs,
+            Err(e) => {
+                tracing::error!(error = %e, %schema_id, "attestations_page filtered");
+                return internal_error();
+            }
+        };
+    Json(attestation_page_response(&mut rows, limit)).into_response()
+}
+
+/// `GET /v1/attestor-sets/{id}/attestations` — attestations whose
+/// bound schema's attestor set matches. Two-hop JOIN at the SQL
+/// layer; handler is the same shape as the schema-filter variant.
+pub async fn attestations_by_attestor_set(
+    State(state): State<AppState>,
+    Path(set_id): Path<String>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let limit = cursor::resolve_limit(params.limit);
+    let before = decode_attestations_cursor(&params);
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows =
+        match queries::attestations_by_attestor_set(&state.pg, &set_id, before, limit_plus_one)
+            .await
+        {
+            Ok(rs) => rs,
+            Err(e) => {
+                tracing::error!(error = %e, %set_id, "attestations_by_attestor_set");
+                return internal_error();
+            }
+        };
+    Json(attestation_page_response(&mut rows, limit)).into_response()
+}
+
+fn decode_attestations_cursor(params: &PaginationParams) -> Option<queries::AttestationsCursor> {
+    params
+        .before
+        .as_deref()
+        .and_then(cursor::decode::<AttestationsCursor>)
+        .map(|c| queries::AttestationsCursor {
+            submitted_at_slot: c.slot as i64,
+            schema_id: c.schema_id,
+            payload_hash: c.payload_hash,
+        })
+}
+
+fn attestation_page_response(
+    rows: &mut Vec<queries::AttestationRow>,
+    limit: u32,
+) -> Page<AttestationResponse> {
+    let has_more = rows.len() as i64 > limit as i64;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+    let next = if has_more {
+        rows.last().and_then(|r| {
+            cursor::encode(&AttestationsCursor {
+                slot: r.submitted_at_slot as u64,
+                schema_id: r.schema_id.clone(),
+                payload_hash: r.payload_hash.clone(),
+            })
+            .ok()
+        })
+    } else {
+        None
+    };
+    let data: Vec<AttestationResponse> = std::mem::take(rows)
+        .into_iter()
+        .map(attestation_row_to_response)
+        .collect();
+    Page {
+        data,
+        pagination: Pagination { next, limit },
+    }
+}
+
+fn attestation_row_to_response(row: queries::AttestationRow) -> AttestationResponse {
+    AttestationResponse {
+        id: format!("{}:{}", row.schema_id, row.payload_hash),
+        schema_id: row.schema_id,
+        payload_hash: row.payload_hash,
+        submitter: row.submitter,
+        submitter_pubkey: row.submitter_pubkey,
+        signature_count: row.signature_count as u32,
+        submitted_at: RegisteredAtResponse {
+            block_height: row.submitted_at_slot as u64,
+            tx_hash: row.submitted_at_tx,
+            timestamp: row
+                .submitted_at_timestamp
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+        },
+    }
+}
+
+// ---- Attestor sets list ----------------------------------------------------
+
+/// Cursor shape for `/v1/attestor-sets`. Same compound shape as
+/// `SchemasCursor`.
+#[derive(Debug, Serialize, Deserialize)]
+struct AttestorSetsCursor {
+    slot: u64,
+    id: String,
+}
+
+/// `GET /v1/attestor-sets` — paginated list of attestor sets.
+pub async fn attestor_sets_list(
+    State(state): State<AppState>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let limit = cursor::resolve_limit(params.limit);
+    let before = params
+        .before
+        .as_deref()
+        .and_then(cursor::decode::<AttestorSetsCursor>)
+        .map(|c| queries::AttestorSetsCursor {
+            registered_at_slot: c.slot as i64,
+            id: c.id,
+        });
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows = match queries::attestor_sets_page(&state.pg, before, limit_plus_one).await {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(error = %e, "attestor_sets_page in /v1/attestor-sets");
+            return internal_error();
+        }
+    };
+    let has_more = rows.len() as i64 > limit as i64;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+    let next = if has_more {
+        rows.last().and_then(|r| {
+            cursor::encode(&AttestorSetsCursor {
+                slot: r.registered_at_slot as u64,
+                id: r.id.clone(),
+            })
+            .ok()
+        })
+    } else {
+        None
+    };
+    let data: Vec<AttestorSetResponse> =
+        rows.into_iter().map(attestor_set_row_to_response).collect();
+    Json(Page {
+        data,
+        pagination: Pagination { next, limit },
+    })
+    .into_response()
+}
+
+fn attestor_set_row_to_response(row: queries::AttestorSetRow) -> AttestorSetResponse {
+    let members: Vec<String> = match row.members {
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .filter_map(|v| match v {
+                serde_json::Value::String(s) => Some(s),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    AttestorSetResponse {
+        id: row.id,
+        members,
+        threshold: row.threshold as u8,
+        registered_at: RegisteredAtResponse {
+            block_height: row.registered_at_slot as u64,
+            tx_hash: row.registered_at_tx,
+            timestamp: row
+                .registered_at_timestamp
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+        },
+        schema_count: row.schema_count as u32,
+    }
+}
+
+// ---- Search ----------------------------------------------------------------
+
+/// Query params for `/v1/search`. Just the search string.
+#[derive(Debug, Deserialize)]
+pub struct SearchParams {
+    pub q: String,
+}
+
+/// `GET /v1/search?q=<string>` — resolve a hash / address / id / block
+/// height to its typed resource kind. Returns a [`SearchResponse`]
+/// envelope with a `kind` discriminator the explorer switches on to
+/// route to the right detail page.
+///
+/// Prefix dispatch:
+///
+/// - All-digit `q` → block height (resolved against `slots.height`)
+/// - `lblk1...`   → block (resolved against `slots.hash`)
+/// - `ltx1...`    → tx (resolved against `transactions.hash`)
+/// - `lig1...`    → address (resolved against `address_summaries.address`)
+/// - `lsc1...`    → schema (resolved against `schemas.id`)
+/// - `las1...`    → attestor set (resolved against `attestor_sets.id`)
+/// - `lph1...`    → first attestation whose `payload_hash` matches
+///   (returned as the `(schema_id, payload_hash)` pair
+///   the explorer needs to deep-link)
+///
+/// Anything else, or a prefix that doesn't resolve to an indexed row,
+/// returns `{ "kind": "not_found", "query": "<echoed>" }` with HTTP
+/// 200 (not 404 — the request itself succeeded; the absence of a
+/// match is the answer).
+pub async fn search(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> impl IntoResponse {
+    let q = params.q.trim().to_string();
+    if q.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "q is required"})),
+        )
+            .into_response();
+    }
+    // Numeric first (block height).
+    if let Ok(h) = q.parse::<i64>() {
+        match queries::slot_by_height(&state.pg, h).await {
+            Ok(Some(_)) => {
+                return Json(SearchResponse::Block {
+                    block_height: h as u64,
+                })
+                .into_response();
+            }
+            Ok(None) => {} // fall through to not_found below
+            Err(e) => {
+                tracing::error!(error = %e, height = h, "search slot lookup");
+                return internal_error();
+            }
+        }
+    }
+    // Prefix dispatch. Each branch only does one DB round-trip.
+    let lowered = q.to_lowercase();
+    if lowered.starts_with("lblk1") {
+        match queries::slot_height_for_block_hash(&state.pg, &lowered).await {
+            Ok(Some(h)) => {
+                return Json(SearchResponse::Block {
+                    block_height: h as u64,
+                })
+                .into_response();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(error = %e, %lowered, "search slot-by-hash");
+                return internal_error();
+            }
+        }
+    } else if lowered.starts_with("ltx1") {
+        match queries::tx_by_hash(&state.pg, &lowered).await {
+            Ok(Some(_)) => {
+                return Json(SearchResponse::Tx { tx_hash: lowered }).into_response();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(error = %e, %lowered, "search tx_by_hash");
+                return internal_error();
+            }
+        }
+    } else if lowered.starts_with("lig1") {
+        match queries::address_exists(&state.pg, &lowered).await {
+            Ok(true) => {
+                return Json(SearchResponse::Address { address: lowered }).into_response();
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(error = %e, %lowered, "search address_exists");
+                return internal_error();
+            }
+        }
+    } else if lowered.starts_with("lsc1") {
+        match queries::schema_exists(&state.pg, &lowered).await {
+            Ok(true) => {
+                return Json(SearchResponse::Schema { schema_id: lowered }).into_response();
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(error = %e, %lowered, "search schema_exists");
+                return internal_error();
+            }
+        }
+    } else if lowered.starts_with("las1") {
+        match queries::attestor_set_exists(&state.pg, &lowered).await {
+            Ok(true) => {
+                return Json(SearchResponse::AttestorSet {
+                    attestor_set_id: lowered,
+                })
+                .into_response();
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(error = %e, %lowered, "search attestor_set_exists");
+                return internal_error();
+            }
+        }
+    } else if lowered.starts_with("lph1") {
+        match queries::attestation_by_payload_hash(&state.pg, &lowered).await {
+            Ok(Some((schema_id, payload_hash))) => {
+                return Json(SearchResponse::Attestation {
+                    schema_id,
+                    payload_hash,
+                })
+                .into_response();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(error = %e, %lowered, "search attestation_by_payload_hash");
+                return internal_error();
+            }
+        }
+    }
+    Json(SearchResponse::NotFound { query: q }).into_response()
 }

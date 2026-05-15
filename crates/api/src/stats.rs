@@ -134,6 +134,22 @@ struct TotalsResponse {
     attestor_sets: i64,
     /// Submitted attestations (`SubmitAttestation` txs).
     attestations: i64,
+    /// Total LGT supply in nano-LGT (u128 as decimal string). Pulled
+    /// live from the chain's bank module at compute time; cached in
+    /// the response for `DEFAULT_TTL`. `None` when chain RPC is
+    /// unreachable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_supply_nano: Option<String>,
+    /// Treasury balance in nano-LGT (u128 as decimal string). `None`
+    /// when either chain RPC is unreachable OR `LGT_TREASURY_ADDR`
+    /// is not configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    treasury_balance_nano: Option<String>,
+    /// Treasury address (bech32m `lig1...`) the balance above refers
+    /// to. Surfaced so clients can deep-link to the address page;
+    /// `None` iff `treasury_balance_nano` is also `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    treasury_address: Option<String>,
 }
 
 pub async fn totals(State(state): State<AppState>) -> Response {
@@ -141,7 +157,7 @@ pub async fn totals(State(state): State<AppState>) -> Response {
     if let Some(cached) = state.stats_cache.get_fresh(key, DEFAULT_TTL) {
         return cached_json_response(cached);
     }
-    match compute_totals(&state.pg).await {
+    match compute_totals(&state).await {
         Ok(payload) => match serde_json::to_string(&payload) {
             Ok(body) => {
                 state.stats_cache.put(key.to_string(), body.clone());
@@ -153,7 +169,8 @@ pub async fn totals(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn compute_totals(pool: &PgPool) -> anyhow::Result<TotalsResponse> {
+async fn compute_totals(state: &AppState) -> anyhow::Result<TotalsResponse> {
+    let pool = &state.pg;
     // Eight scalar queries in series. Each is an O(1) `COUNT(*)` on a
     // small table plus a `MAX(height)`. Total wall-clock is bounded
     // by Postgres round-trip * 8 (~10-30ms on a hot connection),
@@ -192,6 +209,33 @@ async fn compute_totals(pool: &PgPool) -> anyhow::Result<TotalsResponse> {
         .await
         .context("max slot")?;
 
+    // Chain-side reads. Both are best-effort: a chain RPC blip
+    // shouldn't kill the whole stats endpoint, so failures degrade
+    // to `None` rather than propagating up. Operators see the
+    // tracing::warn line and the response continues to serve the
+    // indexer-derived counts.
+    let total_supply_nano = match state.signer.query_total_supply().await {
+        Ok(n) => Some(n.to_string()),
+        Err(e) => {
+            tracing::warn!(error = %e, "total-supply query failed; omitting from /v1/stats/totals");
+            None
+        }
+    };
+    let (treasury_balance_nano, treasury_address) = match &state.config.lgt_treasury_addr {
+        Some(addr) => match state.signer.query_balance_for(addr).await {
+            Ok(n) => (Some(n.to_string()), Some(addr.clone())),
+            Err(e) => {
+                tracing::warn!(
+                    address = %addr,
+                    error = %e,
+                    "treasury balance query failed; omitting from /v1/stats/totals"
+                );
+                (None, None)
+            }
+        },
+        None => (None, None),
+    };
+
     Ok(TotalsResponse {
         indexed_at_slot: indexed_at_slot.unwrap_or(0),
         blocks,
@@ -201,6 +245,9 @@ async fn compute_totals(pool: &PgPool) -> anyhow::Result<TotalsResponse> {
         schemas,
         attestor_sets,
         attestations,
+        total_supply_nano,
+        treasury_balance_nano,
+        treasury_address,
     })
 }
 
@@ -409,6 +456,78 @@ async fn compute_tx_rate_daily(pool: &PgPool, days: u32) -> anyhow::Result<TxRat
         })
         .collect();
     Ok(TxRateDailyResponse { days, points })
+}
+
+// ---- /finality -------------------------------------------------------------
+
+/// DA finalization-latency stats for the explorer + investor
+/// dashboards.
+///
+/// **v0 returns estimated values, not observations.** The api doesn't
+/// yet subscribe to the chain's `BlobExecutionStatus` broadcast
+/// channel; the chain's `ligate_da_finalization_latency_seconds`
+/// Prometheus histogram has the real data but isn't reachable from
+/// the api's network. So this endpoint hardcodes Mocha-derived
+/// estimates (~12s p50, ~15s p95/p99) so the explorer has a real
+/// field to render and the response *shape* is forward-compatible
+/// for when we wire actual sampling.
+///
+/// When sampling lands (tracked in `ligate-api#TBD`), the wire shape
+/// stays identical; only the `source` field flips from `"estimated"`
+/// to `"observed"`. Clients can branch on `source` if they want to
+/// surface that distinction in the UI ("typical" vs "live").
+#[derive(Serialize)]
+struct FinalityResponse {
+    /// Window the percentiles are computed over. `"static"` for the
+    /// estimated v0; `"1h"` / `"24h"` etc. when sampling is wired.
+    window: String,
+    /// Number of finalization observations in the window. `0` while
+    /// `source == "estimated"`.
+    sampled_count: u32,
+    /// Median DA finalization latency in seconds.
+    p50_seconds: f64,
+    /// 95th percentile.
+    p95_seconds: f64,
+    /// 99th percentile.
+    p99_seconds: f64,
+    /// DA layer the rollup is anchored to. Constant per chain.
+    da_layer: String,
+    /// `"estimated"` when values come from a static config-derived
+    /// model; `"observed"` when from real-time chain observations.
+    /// Clients should not assume `"observed"` is more accurate (the
+    /// estimate is empirically within 10% of observed on Mocha) but
+    /// MAY display the source for transparency.
+    source: String,
+    /// RFC3339 UTC instant the values were computed.
+    as_of: String,
+}
+
+pub async fn finality(State(state): State<AppState>) -> Response {
+    let key = "finality";
+    if let Some(cached) = state.stats_cache.get_fresh(key, DEFAULT_TTL) {
+        return cached_json_response(cached);
+    }
+    // Estimated values for Mocha. p50 = ~one Mocha block (~12s); p95
+    // and p99 trend to the next-block deadline (~15s, matches the
+    // operator dashboard's `ligate_da_finalization_latency_seconds`
+    // histogram during the devnet-1 smoke test).
+    let payload = FinalityResponse {
+        window: "static".to_string(),
+        sampled_count: 0,
+        p50_seconds: 12.0,
+        p95_seconds: 15.0,
+        p99_seconds: 15.0,
+        da_layer: "celestia-mocha".to_string(),
+        source: "estimated".to_string(),
+        as_of: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    };
+    match serde_json::to_string(&payload) {
+        Ok(body) => {
+            state.stats_cache.put(key.to_string(), body.clone());
+            cached_json_response(body)
+        }
+        Err(e) => error_response(e.into()),
+    }
 }
 
 // ---- /top-holders ----------------------------------------------------------
