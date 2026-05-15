@@ -112,7 +112,12 @@ async fn main() -> Result<()> {
         hex::decode(&config.lgt_token_id_hex).context("LGT_TOKEN_ID must be valid hex")?;
     let lgt_token_id = TokenId::try_from(token_id_bytes.as_slice())
         .map_err(|e| anyhow::anyhow!("LGT_TOKEN_ID wrong shape: {e:?}"))?;
-    let signer = Signer::new(
+    // Seed the in-memory nonce counter from chain unless the operator
+    // explicitly pinned it via `DRIP_STARTING_NONCE`. Auto-seeding is
+    // what makes a Railway redeploy safe: without it, the counter
+    // resets to 0 every restart while the on-chain nonce is at N, and
+    // the next drip after each redeploy 4xx's with `Tx bad nonce`.
+    let (signer, starting_nonce) = Signer::new_with_chain_seed(
         &config.drip_signer_key,
         config.chain_rpc.clone(),
         config.chain_id,
@@ -120,9 +125,19 @@ async fn main() -> Result<()> {
         lgt_token_id,
         config.drip_starting_nonce,
     )
+    .await
     .context("building drip signer")?;
 
-    info!(faucet_address = %signer.address(), "drip signer loaded");
+    info!(
+        faucet_address = %signer.address(),
+        starting_nonce,
+        nonce_source = if config.drip_starting_nonce.is_some() {
+            "DRIP_STARTING_NONCE override"
+        } else {
+            "chain (auto-seeded)"
+        },
+        "drip signer loaded",
+    );
 
     // Optional drip-budget sanity check — refuse to start if the
     // signer's balance covers fewer than `MIN_DRIPS_BUDGET` drips. Set

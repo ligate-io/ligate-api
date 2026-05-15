@@ -51,9 +51,15 @@ pub struct Config {
     /// fewer than this many drips. Default 100. `0` to disable.
     pub drip_min_budget: u64,
 
-    /// Starting nonce for the drip signer. Default 0; bump if the
-    /// signer key has prior on-chain history (rare).
-    pub drip_starting_nonce: u64,
+    /// Starting nonce override for the drip signer.
+    ///
+    /// - `None` (DRIP_STARTING_NONCE unset): the api queries the chain
+    ///   on startup and uses the current on-chain nonce. The right
+    ///   default; survives Railway redeploys without operator action.
+    /// - `Some(n)` (DRIP_STARTING_NONCE=n): use `n` verbatim, skip the
+    ///   chain query. Escape hatch for offline boots, recovery from a
+    ///   wedged uniqueness state, or chain-RPC outages at startup.
+    pub drip_starting_nonce: Option<u64>,
 
     /// Slot height to start the indexer ingest from. `None` means
     /// resume from DB or 1 if empty.
@@ -115,7 +121,11 @@ impl Config {
         let drip_rate_limit_secs =
             parse_env_u64("DRIP_RATE_LIMIT_SECS", DEFAULT_DRIP_RATE_LIMIT_SECS)?;
         let drip_min_budget = parse_env_u64("DRIP_MIN_BUDGET", DEFAULT_DRIP_MIN_BUDGET)?;
-        let drip_starting_nonce = parse_env_u64("DRIP_STARTING_NONCE", 0)?;
+        let drip_starting_nonce = std::env::var("DRIP_STARTING_NONCE")
+            .ok()
+            .map(|s| s.parse::<u64>())
+            .transpose()
+            .context("DRIP_STARTING_NONCE must be u64")?;
 
         let indexer_start_height = std::env::var("INDEXER_START_HEIGHT")
             .ok()
