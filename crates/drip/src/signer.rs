@@ -248,17 +248,23 @@ impl Signer {
     /// open.
     pub async fn query_total_supply(&self) -> Result<u128, anyhow::Error> {
         use anyhow::Context;
-        let token_id_hex = hex::encode(self.lgt_token_id.as_bytes());
-        let path = format!("/modules/bank/tokens/0x{token_id_hex}/total-supply");
+        // The chain's bank-module path parser accepts the bech32m
+        // `token_1...` form for `{token_id}`, NOT the raw 32-byte
+        // hex. Passing hex trips the bech32 checksum validation and
+        // returns 400 ("Bech32 error: invalid checksum"). Use the
+        // already-cached bech32m form on `Signer`.
+        let token_id = self.lgt_token_id.to_bech32().to_string();
+        let path = format!("/modules/bank/tokens/{token_id}/total-supply");
         let body = self
             .submitter
             .inner()
             .http_get(&path)
             .await
             .with_context(|| format!("fetching total supply via {path}"))?;
-        // Chain returns `{"amount": "<u128>"}` for total-supply. The
-        // `amount` field comes back as a string-shaped numeric per
-        // RFC 0002 (u128 doesn't fit JSON `number`).
+        // Chain returns `{"amount": "<u128>", "token_id": "<bech32m>"}`
+        // for total-supply. The `amount` field comes back as a
+        // string-shaped numeric per RFC 0002 (u128 doesn't fit JSON
+        // `number`); we ignore the echoed `token_id`.
         #[derive(serde::Deserialize)]
         struct SupplyResp {
             amount: String,
