@@ -17,6 +17,10 @@ chrono.workspace = true
 dashmap.workspace = true
 hex.workspace = true
 serde.workspace = true
+# `serde_json` for parsing the chain's `/modules/uniqueness/state/nonces/items/{cred_id}`
+# JSON response in `signer::fetch_account_nonce` (workaround for the
+# SDK fork's broken nonce-path; see signer.rs::fetch_account_nonce).
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
