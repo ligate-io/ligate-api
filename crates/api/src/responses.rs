@@ -322,7 +322,14 @@ pub struct AttestationResponse {
     /// NOT one of the attestors; the relayer.
     pub submitter: String,
     /// Pubkey of the submitter (32 bytes, bech32m `lpk1...`).
-    pub submitter_pubkey: String,
+    /// `None` when the chain didn't emit it on the event payload
+    /// (the `submitter` event field is `S::Address` only, not pubkey;
+    /// migration 0004 relaxed `attestations.submitter_pubkey` to
+    /// nullable per the indexer-side compromise). Partners who need
+    /// the pubkey resolve via the `accounts` module's state at
+    /// read time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submitter_pubkey: Option<String>,
     /// Count of valid attestor signatures included. Chain enforces
     /// `>= schema.threshold`, so this is always populated and always
     /// at least 1.

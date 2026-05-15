@@ -661,7 +661,11 @@ pub struct AttestationRow {
     /// Bech32m `lph1...` payload hash.
     pub payload_hash: String,
     pub submitter: String,
-    pub submitter_pubkey: String,
+    /// Nullable per migration 0004 — chain emits `submitter` as
+    /// `S::Address` only; the raw pubkey isn't on the event payload,
+    /// so partners who need it resolve via the `accounts` module at
+    /// read time.
+    pub submitter_pubkey: Option<String>,
     pub submitted_at_slot: i64,
     pub submitted_at_tx: String,
     pub submitted_at_timestamp: DateTime<Utc>,
@@ -694,7 +698,7 @@ pub async fn attestations_page(
         String,
         String,
         String,
-        String,
+        Option<String>,
         i64,
         String,
         DateTime<Utc>,
@@ -785,7 +789,7 @@ pub async fn attestations_by_attestor_set(
         String,
         String,
         String,
-        String,
+        Option<String>,
         i64,
         String,
         DateTime<Utc>,
@@ -843,7 +847,7 @@ pub async fn attestation_by_pair(
         String,
         String,
         String,
-        String,
+        Option<String>,
         i64,
         String,
         DateTime<Utc>,
@@ -868,7 +872,7 @@ fn attestation_row_from_tuple(
         String,
         String,
         String,
-        String,
+        Option<String>,
         i64,
         String,
         DateTime<Utc>,
