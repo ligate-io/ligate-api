@@ -472,6 +472,10 @@ pub struct MultiAddress {
 /// this is where to track the change.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttestationAttestorSetRegisteredEvent {
+    /// Inner externally-tagged variant. Wire name is the PascalCase
+    /// variant identifier (`AttestorSetRegistered`); Rust field name
+    /// is the descriptive snake_case form for ergonomic access in the
+    /// parser.
     #[serde(rename = "AttestorSetRegistered")]
     pub attestor_set_registered: AttestorSetRegisteredDetails,
 }
@@ -494,6 +498,9 @@ pub struct AttestorSetRegisteredDetails {
 /// Payload of `AttestationModule/SchemaRegistered`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttestationSchemaRegisteredEvent {
+    /// Inner externally-tagged variant. See
+    /// [`AttestationAttestorSetRegisteredEvent`] for the wire-vs-Rust
+    /// naming convention.
     #[serde(rename = "SchemaRegistered")]
     pub schema_registered: SchemaRegisteredDetails,
 }
@@ -528,6 +535,9 @@ pub struct SchemaRegisteredDetails {
 /// Payload of `AttestationModule/AttestationSubmitted`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttestationAttestationSubmittedEvent {
+    /// Inner externally-tagged variant. See
+    /// [`AttestationAttestorSetRegisteredEvent`] for the wire-vs-Rust
+    /// naming convention.
     #[serde(rename = "AttestationSubmitted")]
     pub attestation_submitted: AttestationSubmittedDetails,
 }
