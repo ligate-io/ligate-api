@@ -300,3 +300,79 @@ pub struct Pagination {
     /// against `MAX_PAGE_SIZE`).
     pub limit: u32,
 }
+
+/// One attestation, served at `GET /v1/attestations/{id}` and as each
+/// element of `GET /v1/attestations` / `/v1/schemas/{id}/attestations`
+/// / `/v1/attestor-sets/{id}/attestations`.
+///
+/// `id` is the compound `<schema_id>:<payload_hash>` form that
+/// `/v1/attestations/{id}` accepts as a path parameter. Surfaced
+/// separately from the constituent `schema_id` + `payload_hash`
+/// fields so partners can pass `id` opaquely to deep-link routes
+/// without re-composing it themselves.
+#[derive(Debug, Serialize)]
+pub struct AttestationResponse {
+    /// Compound `<schema_id>:<payload_hash>` id (both bech32m).
+    pub id: String,
+    /// Bech32m `lsc1...` schema id this attestation is bound to.
+    pub schema_id: String,
+    /// Bech32m `lph1...` hash of the off-chain payload.
+    pub payload_hash: String,
+    /// Address that submitted the on-chain `SubmitAttestation` tx.
+    /// NOT one of the attestors; the relayer.
+    pub submitter: String,
+    /// Pubkey of the submitter (32 bytes, bech32m `lpk1...`).
+    pub submitter_pubkey: String,
+    /// Count of valid attestor signatures included. Chain enforces
+    /// `>= schema.threshold`, so this is always populated and always
+    /// at least 1.
+    pub signature_count: u32,
+    /// Provenance of the on-chain submission.
+    pub submitted_at: RegisteredAtResponse,
+}
+
+/// `GET /v1/search?q=<string>` response.
+///
+/// `kind` discriminates which resource the query resolved to; the
+/// remaining fields carry only what the explorer needs to redirect
+/// (block height, tx hash, address, etc.). Full resource details
+/// come from a follow-up call to the typed endpoint.
+///
+/// JSON shape (untagged enum is intentional — clients switch on
+/// `kind` and read the resource-specific field):
+///
+/// ```json
+/// { "kind": "block", "block_height": 4882 }
+/// { "kind": "tx", "tx_hash": "ltx1..." }
+/// { "kind": "address", "address": "lig1..." }
+/// { "kind": "schema", "schema_id": "lsc1..." }
+/// { "kind": "attestor_set", "attestor_set_id": "las1..." }
+/// { "kind": "attestation", "schema_id": "lsc1...", "payload_hash": "lph1..." }
+/// { "kind": "not_found", "query": "..." }
+/// ```
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SearchResponse {
+    Block {
+        block_height: u64,
+    },
+    Tx {
+        tx_hash: String,
+    },
+    Address {
+        address: String,
+    },
+    Schema {
+        schema_id: String,
+    },
+    AttestorSet {
+        attestor_set_id: String,
+    },
+    Attestation {
+        schema_id: String,
+        payload_hash: String,
+    },
+    NotFound {
+        query: String,
+    },
+}

@@ -232,6 +232,44 @@ impl Signer {
         Ok(amount.0)
     }
 
+    /// Query the chain for the configured gas-token's total supply
+    /// (nano-LGT).
+    ///
+    /// Hits `GET /v1/modules/bank/tokens/{token_id}/total-supply` on
+    /// the chain RPC directly. The SDK's `NodeClient` doesn't expose
+    /// a typed helper for this (`get_balance_for_holder` is the only
+    /// bank read covered), so we go through the underlying `http_get`
+    /// and parse the response shape (`{"amount":"<u128>"}`) by hand.
+    ///
+    /// Used by `/v1/stats/totals` to surface total supply as a
+    /// dashboard-level key number. Cached upstream (30s TTL on the
+    /// stats response), so the per-request chain round-trip stays
+    /// bounded regardless of how many concurrent Grafana scrapes are
+    /// open.
+    pub async fn query_total_supply(&self) -> Result<u128, anyhow::Error> {
+        use anyhow::Context;
+        let token_id_hex = hex::encode(self.lgt_token_id.as_bytes());
+        let path = format!("/modules/bank/tokens/0x{token_id_hex}/total-supply");
+        let body = self
+            .submitter
+            .inner()
+            .http_get(&path)
+            .await
+            .with_context(|| format!("fetching total supply via {path}"))?;
+        // Chain returns `{"amount": "<u128>"}` for total-supply. The
+        // `amount` field comes back as a string-shaped numeric per
+        // RFC 0002 (u128 doesn't fit JSON `number`).
+        #[derive(serde::Deserialize)]
+        struct SupplyResp {
+            amount: String,
+        }
+        let resp: SupplyResp = serde_json::from_str(&body)
+            .with_context(|| format!("parsing total-supply response: {body}"))?;
+        resp.amount
+            .parse::<u128>()
+            .with_context(|| format!("total-supply.amount not a u128: {}", resp.amount))
+    }
+
     /// Bech32m `token_1...` form of the gas-token id. Mirrors what
     /// the chain emits on REST. Used by the api's address-summary
     /// handler to surface `balances[].token_id` in the canonical

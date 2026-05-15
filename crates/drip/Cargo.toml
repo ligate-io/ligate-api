@@ -17,6 +17,10 @@ chrono.workspace = true
 dashmap.workspace = true
 hex.workspace = true
 serde.workspace = true
+# `serde_json` for parsing the chain's bank-module `total-supply`
+# REST response in `signer::query_total_supply` (the SDK's typed
+# helpers cover per-address balances but not aggregate supply).
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

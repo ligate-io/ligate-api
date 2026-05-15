@@ -644,3 +644,366 @@ fn tx_row_from_tuple(
         block_timestamp,
     }
 }
+
+// ---- attestations ----------------------------------------------------------
+
+/// One row of `attestations` plus the FK-joined registration provenance.
+///
+/// The chain identifies an attestation by `(schema_id, payload_hash)`;
+/// our wire representation collapses that into a compound id
+/// `"<schema_id>:<payload_hash>"` for path routing (`/v1/attestations/{id}`).
+/// The handler does the split/join; this row carries the constituent
+/// fields verbatim so the wire layer can compose either form without
+/// re-parsing.
+#[derive(Debug)]
+pub struct AttestationRow {
+    pub schema_id: String,
+    /// Bech32m `lph1...` payload hash.
+    pub payload_hash: String,
+    pub submitter: String,
+    pub submitter_pubkey: String,
+    pub submitted_at_slot: i64,
+    pub submitted_at_tx: String,
+    pub submitted_at_timestamp: DateTime<Utc>,
+    /// `attestations.signature_count` column (chain enforces this is
+    /// `>= schema.threshold`, so it's always populated).
+    pub signature_count: i32,
+}
+
+/// Cursor shape for `/v1/attestations` (compound:
+/// `(submitted_at_slot, schema_id, payload_hash)` all DESC). The
+/// payload-hash tiebreaker handles the edge case where two
+/// attestations under different schemas land in the same slot.
+pub struct AttestationsCursor {
+    pub submitted_at_slot: i64,
+    pub schema_id: String,
+    pub payload_hash: String,
+}
+
+/// Read a page of attestations, descending by `(submitted_at_slot,
+/// schema_id, payload_hash)`. Optionally filter to a single
+/// `schema_id_filter` for `/v1/schemas/{id}/attestations`.
+pub async fn attestations_page(
+    pool: &PgPool,
+    schema_id_filter: Option<&str>,
+    before: Option<AttestationsCursor>,
+    limit_plus_one: i64,
+) -> sqlx::Result<Vec<AttestationRow>> {
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        DateTime<Utc>,
+        i32,
+    )> = match (schema_id_filter, before) {
+        (Some(s), Some(c)) => {
+            sqlx::query_as(
+                "SELECT schema_id, payload_hash, submitter, submitter_pubkey,
+                        submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
+                        signature_count
+                 FROM attestations
+                 WHERE schema_id = $1
+                   AND (submitted_at_slot, schema_id, payload_hash) < ($2, $3, $4)
+                 ORDER BY submitted_at_slot DESC, schema_id DESC, payload_hash DESC
+                 LIMIT $5",
+            )
+            .bind(s)
+            .bind(c.submitted_at_slot)
+            .bind(&c.schema_id)
+            .bind(&c.payload_hash)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+        (Some(s), None) => {
+            sqlx::query_as(
+                "SELECT schema_id, payload_hash, submitter, submitter_pubkey,
+                        submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
+                        signature_count
+                 FROM attestations
+                 WHERE schema_id = $1
+                 ORDER BY submitted_at_slot DESC, schema_id DESC, payload_hash DESC
+                 LIMIT $2",
+            )
+            .bind(s)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+        (None, Some(c)) => {
+            sqlx::query_as(
+                "SELECT schema_id, payload_hash, submitter, submitter_pubkey,
+                        submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
+                        signature_count
+                 FROM attestations
+                 WHERE (submitted_at_slot, schema_id, payload_hash) < ($1, $2, $3)
+                 ORDER BY submitted_at_slot DESC, schema_id DESC, payload_hash DESC
+                 LIMIT $4",
+            )
+            .bind(c.submitted_at_slot)
+            .bind(&c.schema_id)
+            .bind(&c.payload_hash)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+        (None, None) => {
+            sqlx::query_as(
+                "SELECT schema_id, payload_hash, submitter, submitter_pubkey,
+                        submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
+                        signature_count
+                 FROM attestations
+                 ORDER BY submitted_at_slot DESC, schema_id DESC, payload_hash DESC
+                 LIMIT $1",
+            )
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+    Ok(rows.into_iter().map(attestation_row_from_tuple).collect())
+}
+
+/// Read a page of attestations filtered to a single attestor-set id.
+///
+/// Two-hop: an attestor set doesn't directly point at attestations,
+/// it points at schemas (via `schemas.attestor_set_id`), and schemas
+/// point at attestations (via `attestations.schema_id`). One JOIN
+/// stitches them.
+pub async fn attestations_by_attestor_set(
+    pool: &PgPool,
+    attestor_set_id: &str,
+    before: Option<AttestationsCursor>,
+    limit_plus_one: i64,
+) -> sqlx::Result<Vec<AttestationRow>> {
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        DateTime<Utc>,
+        i32,
+    )> = match before {
+        Some(c) => {
+            sqlx::query_as(
+                "SELECT a.schema_id, a.payload_hash, a.submitter, a.submitter_pubkey,
+                        a.submitted_at_slot, a.submitted_at_tx, a.submitted_at_timestamp,
+                        a.signature_count
+                 FROM attestations a
+                 JOIN schemas s ON s.id = a.schema_id
+                 WHERE s.attestor_set_id = $1
+                   AND (a.submitted_at_slot, a.schema_id, a.payload_hash) < ($2, $3, $4)
+                 ORDER BY a.submitted_at_slot DESC, a.schema_id DESC, a.payload_hash DESC
+                 LIMIT $5",
+            )
+            .bind(attestor_set_id)
+            .bind(c.submitted_at_slot)
+            .bind(&c.schema_id)
+            .bind(&c.payload_hash)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                "SELECT a.schema_id, a.payload_hash, a.submitter, a.submitter_pubkey,
+                        a.submitted_at_slot, a.submitted_at_tx, a.submitted_at_timestamp,
+                        a.signature_count
+                 FROM attestations a
+                 JOIN schemas s ON s.id = a.schema_id
+                 WHERE s.attestor_set_id = $1
+                 ORDER BY a.submitted_at_slot DESC, a.schema_id DESC, a.payload_hash DESC
+                 LIMIT $2",
+            )
+            .bind(attestor_set_id)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+    Ok(rows.into_iter().map(attestation_row_from_tuple).collect())
+}
+
+/// Read one attestation by `(schema_id, payload_hash)`. `None` if
+/// not yet indexed.
+pub async fn attestation_by_pair(
+    pool: &PgPool,
+    schema_id: &str,
+    payload_hash: &str,
+) -> sqlx::Result<Option<AttestationRow>> {
+    let row: Option<(
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        DateTime<Utc>,
+        i32,
+    )> = sqlx::query_as(
+        "SELECT schema_id, payload_hash, submitter, submitter_pubkey,
+                submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
+                signature_count
+         FROM attestations
+         WHERE schema_id = $1 AND payload_hash = $2",
+    )
+    .bind(schema_id)
+    .bind(payload_hash)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(attestation_row_from_tuple))
+}
+
+#[allow(clippy::type_complexity)]
+fn attestation_row_from_tuple(
+    t: (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        DateTime<Utc>,
+        i32,
+    ),
+) -> AttestationRow {
+    AttestationRow {
+        schema_id: t.0,
+        payload_hash: t.1,
+        submitter: t.2,
+        submitter_pubkey: t.3,
+        submitted_at_slot: t.4,
+        submitted_at_tx: t.5,
+        submitted_at_timestamp: t.6,
+        signature_count: t.7,
+    }
+}
+
+// ---- attestor_sets list ----------------------------------------------------
+
+/// Cursor shape for `/v1/attestor-sets` (compound:
+/// `(registered_at_slot, id)` DESC). Mirrors `SchemasCursor`.
+pub struct AttestorSetsCursor {
+    pub registered_at_slot: i64,
+    pub id: String,
+}
+
+/// Read a page of attestor sets, descending by
+/// `(registered_at_slot, id)`. Companion to the existing
+/// [`attestor_set_by_id`] for the per-id case.
+pub async fn attestor_sets_page(
+    pool: &PgPool,
+    before: Option<AttestorSetsCursor>,
+    limit_plus_one: i64,
+) -> sqlx::Result<Vec<AttestorSetRow>> {
+    let rows: Vec<(String, Value, i32, i64, String, DateTime<Utc>, i32)> = match before {
+        Some(c) => {
+            sqlx::query_as(
+                "SELECT id, members, threshold,
+                        registered_at_slot, registered_at_tx, registered_at_timestamp,
+                        schema_count
+                 FROM attestor_sets
+                 WHERE (registered_at_slot, id) < ($1, $2)
+                 ORDER BY registered_at_slot DESC, id DESC
+                 LIMIT $3",
+            )
+            .bind(c.registered_at_slot)
+            .bind(&c.id)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                "SELECT id, members, threshold,
+                        registered_at_slot, registered_at_tx, registered_at_timestamp,
+                        schema_count
+                 FROM attestor_sets
+                 ORDER BY registered_at_slot DESC, id DESC
+                 LIMIT $1",
+            )
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+    Ok(rows
+        .into_iter()
+        .map(|t| AttestorSetRow {
+            id: t.0,
+            members: t.1,
+            threshold: t.2,
+            registered_at_slot: t.3,
+            registered_at_tx: t.4,
+            registered_at_timestamp: t.5,
+            schema_count: t.6,
+        })
+        .collect())
+}
+
+// ---- search helpers --------------------------------------------------------
+
+/// Lightweight "does this block-hash exist" check for `/v1/search`.
+/// Returns the slot height the hash hashes to, so the search handler
+/// can redirect to `/v1/blocks/{height}`. The handler doesn't need
+/// the full block row at search time.
+pub async fn slot_height_for_block_hash(pool: &PgPool, hash: &str) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar("SELECT height FROM slots WHERE hash = $1")
+        .bind(hash)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Lightweight "does this address exist" check for `/v1/search`. We
+/// only return `true`/`false` because the search handler just needs
+/// to know whether to redirect to `/v1/addresses/{addr}`; the actual
+/// summary is fetched on that follow-up call.
+pub async fn address_exists(pool: &PgPool, address: &str) -> sqlx::Result<bool> {
+    let r: Option<i64> = sqlx::query_scalar("SELECT 1 FROM address_summaries WHERE address = $1")
+        .bind(address)
+        .fetch_optional(pool)
+        .await?;
+    Ok(r.is_some())
+}
+
+/// Lightweight "does this schema id exist" check.
+pub async fn schema_exists(pool: &PgPool, id: &str) -> sqlx::Result<bool> {
+    let r: Option<i64> = sqlx::query_scalar("SELECT 1 FROM schemas WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(r.is_some())
+}
+
+/// Lightweight "does this attestor-set id exist" check.
+pub async fn attestor_set_exists(pool: &PgPool, id: &str) -> sqlx::Result<bool> {
+    let r: Option<i64> = sqlx::query_scalar("SELECT 1 FROM attestor_sets WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(r.is_some())
+}
+
+/// "Which schema's attestation has this payload hash?" — used by
+/// `/v1/search` when the input is a `lph1...` (payload hash). Returns
+/// the (schema_id, payload_hash) pair of the first match, or `None`.
+/// In v0 we return at most one; explorers wanting all matches can
+/// scan `/v1/schemas/{id}/attestations` per schema.
+pub async fn attestation_by_payload_hash(
+    pool: &PgPool,
+    payload_hash: &str,
+) -> sqlx::Result<Option<(String, String)>> {
+    sqlx::query_as(
+        "SELECT schema_id, payload_hash FROM attestations WHERE payload_hash = $1 LIMIT 1",
+    )
+    .bind(payload_hash)
+    .fetch_optional(pool)
+    .await
+}

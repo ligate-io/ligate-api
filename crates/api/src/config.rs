@@ -64,6 +64,17 @@ pub struct Config {
     /// Slot height to start the indexer ingest from. `None` means
     /// resume from DB or 1 if empty.
     pub indexer_start_height: Option<u64>,
+
+    /// Treasury address (bech32m `lig1...`) used by the
+    /// `/v1/stats/totals` endpoint to surface treasury balance as
+    /// part of the "key numbers" view.
+    ///
+    /// Optional: when unset, the totals endpoint omits the
+    /// `treasury_balance_nano` + `treasury_address` fields and
+    /// returns the rest of the response intact. Genesis pins the
+    /// real treasury at `chain/devnet-1/genesis/bank.json`; partners
+    /// running their own chain copy can leave this unset.
+    pub lgt_treasury_addr: Option<String>,
 }
 
 impl Config {
@@ -133,6 +144,8 @@ impl Config {
             .transpose()
             .context("INDEXER_START_HEIGHT must be u64")?;
 
+        let lgt_treasury_addr = std::env::var("LGT_TREASURY_ADDR").ok();
+
         Ok(Self {
             bind,
             database_url,
@@ -147,6 +160,7 @@ impl Config {
             drip_min_budget,
             drip_starting_nonce,
             indexer_start_height,
+            lgt_treasury_addr,
         })
     }
 }

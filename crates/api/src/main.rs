@@ -229,10 +229,23 @@ async fn main() -> Result<()> {
         .route("/v1/addresses/{addr}", get(handlers::address_summary))
         .route("/v1/schemas", get(handlers::schemas_list))
         .route("/v1/schemas/{id}", get(handlers::schema_by_id))
+        .route("/v1/attestor-sets", get(handlers::attestor_sets_list))
         .route("/v1/attestor-sets/{id}", get(handlers::attestor_set_by_id))
+        .route(
+            "/v1/attestor-sets/{id}/attestations",
+            get(handlers::attestations_by_attestor_set),
+        )
+        .route(
+            "/v1/schemas/{id}/attestations",
+            get(handlers::attestations_by_schema),
+        )
+        .route("/v1/attestations", get(handlers::attestations_list))
+        .route("/v1/attestations/{id}", get(handlers::attestation_by_id))
+        .route("/v1/search", get(handlers::search))
         // Aggregate analytics for the explorer + investor dashboard.
         // All cached 30s in-process; see `stats::StatsCache`.
         .route("/v1/stats/totals", get(stats::totals))
+        .route("/v1/stats/finality", get(stats::finality))
         .route("/v1/stats/active-addresses", get(stats::active_addresses))
         .route("/v1/stats/new-wallets-daily", get(stats::new_wallets_daily))
         .route("/v1/stats/tx-rate-daily", get(stats::tx_rate_daily))
