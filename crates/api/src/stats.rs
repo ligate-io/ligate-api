@@ -530,6 +530,161 @@ pub async fn finality(State(state): State<AppState>) -> Response {
     }
 }
 
+// ---- /next-block-eta -------------------------------------------------------
+
+/// Live block-cadence response, used by explorers to render
+/// "next block in Ns" countdowns. Computed from the last N
+/// observed slots; updates every cache refresh.
+///
+/// The countdown the explorer renders is `seconds_until_expected`
+/// minus the time elapsed since `as_of`. Frontend should locally
+/// tick once per second and re-fetch this endpoint either on a
+/// timer (~10s) or when the countdown rolls negative.
+#[derive(Serialize)]
+struct NextBlockEtaResponse {
+    /// Most recent block the indexer has committed.
+    last_block_height: i64,
+    /// RFC3339 ms UTC timestamp of the most recent block.
+    last_block_timestamp: String,
+    /// Mean wall-clock interval between consecutive slots over the
+    /// sample window. Float seconds. `None` if fewer than 2 slots
+    /// have been indexed (indexer just started, no delta to compute).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mean_block_interval_secs: Option<f64>,
+    /// p95 of the same interval distribution. `None` under-2-slots
+    /// for the same reason as above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    p95_block_interval_secs: Option<f64>,
+    /// RFC3339 ms UTC timestamp the next block is expected at, equal
+    /// to `last_block_timestamp + mean_block_interval`. `None` if we
+    /// can't compute the interval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_next_at: Option<String>,
+    /// Seconds elapsed since `last_block_timestamp` at request time.
+    /// Computed server-side so client clocks don't matter.
+    seconds_since_last: f64,
+    /// `expected_next_at - now`. Negative when overdue (block should
+    /// have arrived but hasn't). `None` when we can't compute the
+    /// interval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seconds_until_expected: Option<f64>,
+    /// How far the indexer is behind the actual chain head, in
+    /// seconds. Hint for clients that the data they're rendering
+    /// might be slightly stale.
+    indexer_lag_secs: f64,
+}
+
+pub async fn next_block_eta(State(state): State<AppState>) -> Response {
+    let key = "next-block-eta";
+    // Cache TTL shorter than the other stats endpoints (5s vs 30s)
+    // because this is the one query whose answer literally changes
+    // every second the chain is alive.
+    let ttl = Duration::from_secs(5);
+    if let Some(cached) = state.stats_cache.get_fresh(key, ttl) {
+        return cached_json_response(cached);
+    }
+    match compute_next_block_eta(&state.pg).await {
+        Ok(payload) => match serde_json::to_string(&payload) {
+            Ok(body) => {
+                state.stats_cache.put(key.to_string(), body.clone());
+                cached_json_response(body)
+            }
+            Err(e) => error_response(e.into()),
+        },
+        Err(e) => error_response(e),
+    }
+}
+
+async fn compute_next_block_eta(pool: &PgPool) -> anyhow::Result<NextBlockEtaResponse> {
+    // Last 100 slots, descending. Window matched to "last ~10 min
+    // on Mocha" (block time ~6s; 100 * 6 = 600s). Enough samples
+    // for a stable mean + p95 without being a wide query.
+    let rows: Vec<(i64, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT height, timestamp \
+         FROM slots \
+         ORDER BY height DESC \
+         LIMIT 100",
+    )
+    .fetch_all(pool)
+    .await
+    .context("fetching recent slots for next-block-eta")?;
+
+    if rows.is_empty() {
+        // No slots indexed at all. Honest empty response; explorer
+        // can fall back to a "indexer warming up" UI.
+        anyhow::bail!("no slots indexed yet");
+    }
+
+    let (latest_height, latest_ts) = rows[0];
+    let now = Utc::now();
+    let seconds_since_last = (now - latest_ts).num_milliseconds() as f64 / 1000.0;
+
+    // For the interval sample we need at least 2 slots. With 1 slot
+    // we can still return the last-block fields and lag, but the
+    // ETA prediction is `None`.
+    let (mean_interval, p95_interval, expected_next_at, seconds_until_expected) = if rows.len() >= 2
+    {
+        // Pairwise deltas: rows is DESC by height, so `rows[i] - rows[i+1]`
+        // is the wall-clock seconds the (i+1) → i transition took.
+        let mut deltas: Vec<f64> = rows
+            .windows(2)
+            .filter_map(|w| {
+                let (newer_ts, older_ts) = (w[0].1, w[1].1);
+                let delta = (newer_ts - older_ts).num_milliseconds() as f64 / 1000.0;
+                // Defensive: drop non-positive deltas (would be a
+                // re-org or clock skew) so they don't poison the
+                // mean. Realistic devnet should never hit this.
+                if delta > 0.0 {
+                    Some(delta)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if deltas.is_empty() {
+            (None, None, None, None)
+        } else {
+            let mean = deltas.iter().sum::<f64>() / (deltas.len() as f64);
+            // p95 via simple-sort percentile. Sample is at most 99
+            // values so the O(n log n) sort cost is negligible vs
+            // the SQL round-trip.
+            deltas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let p95_idx = ((deltas.len() as f64) * 0.95).ceil() as usize - 1;
+            let p95 = deltas[p95_idx.min(deltas.len() - 1)];
+            let expected_at = latest_ts + chrono::Duration::milliseconds((mean * 1000.0) as i64);
+            let until_expected = (expected_at - now).num_milliseconds() as f64 / 1000.0;
+            (
+                Some(mean),
+                Some(p95),
+                Some(expected_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+                Some(until_expected),
+            )
+        }
+    } else {
+        (None, None, None, None)
+    };
+
+    // Indexer-lag: the indexer's `last_indexed_height` (the slot we
+    // just read) vs the actual chain head is not directly available
+    // here. As a proxy we use `seconds_since_last` and cap it at the
+    // mean interval: if `seconds_since_last` is way over mean, that
+    // suggests the indexer is behind (or the chain stalled — both
+    // surfaces as "your data is stale"). For a precise reading the
+    // explorer can cross-reference `/v1/info.head_lag_slots`.
+    let indexer_lag_secs = seconds_since_last.max(0.0);
+
+    Ok(NextBlockEtaResponse {
+        last_block_height: latest_height,
+        last_block_timestamp: latest_ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        mean_block_interval_secs: mean_interval,
+        p95_block_interval_secs: p95_interval,
+        expected_next_at,
+        seconds_since_last,
+        seconds_until_expected,
+        indexer_lag_secs,
+    })
+}
+
 // ---- /top-holders ----------------------------------------------------------
 
 #[derive(Deserialize)]

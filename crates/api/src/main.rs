@@ -246,6 +246,7 @@ async fn main() -> Result<()> {
         // All cached 30s in-process; see `stats::StatsCache`.
         .route("/v1/stats/totals", get(stats::totals))
         .route("/v1/stats/finality", get(stats::finality))
+        .route("/v1/stats/next-block-eta", get(stats::next_block_eta))
         .route("/v1/stats/active-addresses", get(stats::active_addresses))
         .route("/v1/stats/new-wallets-daily", get(stats::new_wallets_daily))
         .route("/v1/stats/tx-rate-daily", get(stats::tx_rate_daily))

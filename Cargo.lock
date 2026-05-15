@@ -3975,6 +3975,7 @@ dependencies = [
  "ligate-rollup",
  "ligate-stf",
  "serde",
+ "serde_json",
  "sov-bank",
  "sov-modules-api",
  "tempfile",
