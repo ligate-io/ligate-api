@@ -34,4 +34,4 @@ restartPolicyMaxRetries = 5
 
 # Health check — Railway pings this to know when the service is up.
 healthcheckPath = "/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 60

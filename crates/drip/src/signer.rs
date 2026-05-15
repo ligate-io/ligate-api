@@ -277,22 +277,41 @@ impl Signer {
     /// Poll the chain via `GET /ledger/txs/{tx_hash}` until the
     /// transaction has been indexed. See ligate-cli#8 for context;
     /// equivalent to the cli's helper of the same name.
+    ///
+    /// `NodeClient::http_get` (in `sov-node-client`) prepends its own
+    /// `base_url` to the path it receives -- so the call must pass the
+    /// PATH, not the full URL. Passing the full URL produces a doubled
+    /// string like `<base>/ledger/txs/<hash><base>/ledger/txs/<hash>`,
+    /// which `reqwest` issues against whatever host it can parse out,
+    /// the chain returns 404 with an empty body, and `http_get` returns
+    /// `Ok("")` because it doesn't check the status code. The previous
+    /// `.is_ok()` check then reported "tx included" on the first poll
+    /// (false positive on every drip). Fixed by passing the path; the
+    /// `full_url` string is kept around solely for the timeout error
+    /// message so operators can `curl` the same URL to verify.
     async fn wait_for_inclusion(&self, tx_hash: &str) -> Result<(), SignerError> {
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
         const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-        let url = format!("{}/ledger/txs/{tx_hash}", self.chain_rpc_with_v1);
+        // For error message only -- not what `http_get` actually receives.
+        let full_url = format!("{}/ledger/txs/{tx_hash}", self.chain_rpc_with_v1);
+        let path = format!("/ledger/txs/{tx_hash}");
         let started = std::time::Instant::now();
         loop {
             if started.elapsed() > MAX_WAIT {
                 return Err(SignerError::SubmitFailed(format!(
                     "timed out after {:?} waiting for tx {tx_hash} to be included; \
-                     drip may still land — check {url} to verify",
+                     drip may still land -- check {full_url} to verify",
                     MAX_WAIT
                 )));
             }
-            if self.submitter.inner().http_get(&url).await.is_ok() {
-                return Ok(());
+            // `http_get` returns `Ok("")` on 404 (SDK doesn't check
+            // status), so empty body == not-yet-indexed == keep polling.
+            // A populated body is the chain returning the indexed tx
+            // JSON, which is what we want.
+            match self.submitter.inner().http_get(&path).await {
+                Ok(body) if !body.trim().is_empty() => return Ok(()),
+                _ => {}
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
