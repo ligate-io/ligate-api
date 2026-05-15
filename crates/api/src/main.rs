@@ -53,6 +53,7 @@ mod cursor;
 mod handlers;
 mod queries;
 mod responses;
+mod stats;
 
 use crate::config::Config;
 
@@ -66,6 +67,11 @@ pub(crate) struct AppState {
     /// Postgres pool. Indexer task writes to this; query handlers read
     /// from it. Connection limits configured in `Config::pg_pool_size`.
     pub pg: sqlx::PgPool,
+    /// 30s in-process cache for `/v1/stats/*` responses. Bounds the
+    /// Postgres + chain-RPC load that concurrent Grafana scrapes can
+    /// put on the api (every dashboard panel for every viewer would
+    /// otherwise hit DB on every refresh).
+    pub stats_cache: stats::StatsCache,
 }
 
 #[tokio::main]
@@ -181,6 +187,7 @@ async fn main() -> Result<()> {
         signer: Arc::new(signer),
         rate_limiter: Arc::new(rate_limiter),
         pg: pg.clone(),
+        stats_cache: stats::StatsCache::new(),
     };
 
     // Spawn the indexer ingest task in the background. If it panics or
@@ -223,6 +230,13 @@ async fn main() -> Result<()> {
         .route("/v1/schemas", get(handlers::schemas_list))
         .route("/v1/schemas/{id}", get(handlers::schema_by_id))
         .route("/v1/attestor-sets/{id}", get(handlers::attestor_set_by_id))
+        // Aggregate analytics for the explorer + investor dashboard.
+        // All cached 30s in-process; see `stats::StatsCache`.
+        .route("/v1/stats/totals", get(stats::totals))
+        .route("/v1/stats/active-addresses", get(stats::active_addresses))
+        .route("/v1/stats/new-wallets-daily", get(stats::new_wallets_daily))
+        .route("/v1/stats/tx-rate-daily", get(stats::tx_rate_daily))
+        .route("/v1/stats/top-holders", get(stats::top_holders))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state);
