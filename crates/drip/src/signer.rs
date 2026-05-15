@@ -362,7 +362,6 @@ impl Signer {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
