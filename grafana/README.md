@@ -8,9 +8,37 @@ of `ligate-devnet-1`. Import each via Grafana → Dashboards → New → Import.
 | File | Use | Data sources |
 |------|-----|--------------|
 | `ligate-devnet-1-investor-metrics.json` | High-level "key numbers, growth, holders, network performance" surface. Shown to investors, partners, design-partner intros. | `Infinity` (api), `grafanacloud-prom` (chain Prometheus). |
+| `operator-panel-replacements.md` | Paste-ready panel JSON for the in-Grafana operator dashboard's two misbehaving "Schemas registered" / "Attestor sets registered" stat panels. Switches them from drifting Prometheus counters to state-derived api queries. | `Infinity` (api). |
 
 The operator-focused dashboard (chain health, mempool, DA, RPC) lives in
 the Grafana UI directly; if exported, drop it here too.
+
+## Two data sources, one dashboard
+
+Every Grafana dashboard in this repo uses **two backends** in parallel:
+
+| Data source | UID in JSON | What it's for | Examples |
+|---|---|---|---|
+| **Prometheus** (Grafana Cloud's hosted metrics) | `grafanacloud-prom` | Time-series: rates, latencies, gauges. Per-process counters are also here, but treat them as *event-rate* signals, not absolute counts. | `ligate_block_height`, `ligate_mempool_depth`, `ligate_da_finalization_latency_seconds`, `ligate_rpc_request_duration_seconds`, `up{}`. |
+| **Infinity** (REST/JSON, pointing at `https://api.ligate.io`) | `ligate-api` | State-derived absolute counts + analytics. Always reflects what's actually in the indexer DB, immune to chain-node restart double-counting. | `/v1/stats/totals` → blocks, txs, addresses, schemas, attestor sets, attestations; `/v1/stats/top-holders`; `/v1/stats/active-addresses`; `/v1/stats/new-wallets-daily`; `/v1/stats/tx-rate-daily`. |
+
+Each Grafana panel picks its source independently via its `datasource`
+field; multiple sources in one dashboard is fine and is the right
+pattern. **Rule of thumb:**
+
+> If the question is "what's the rate / latency / gauge of X over
+> time?", use Prometheus. If the question is "how many X exist right
+> now?", use the api Infinity source.
+
+The chain's per-process Prometheus counters (e.g.
+`ligate_schemas_registered_total`) double-count on every chain-node
+restart because Sovereign rollups replay state at boot, re-firing the
+metric increment. They're useful for `rate(...)` over a window
+(double-counts are bounded; `rate()` is robust to them), but never as
+absolute-count stat panels. The api endpoints sidestep that entirely
+by querying the indexer's rows. See the chain repo's
+[`crates/modules/attestation/src/metrics.rs`](https://github.com/ligate-io/ligate-chain/blob/main/crates/modules/attestation/src/metrics.rs)
+header comment for the long version.
 
 ## One-time setup
 

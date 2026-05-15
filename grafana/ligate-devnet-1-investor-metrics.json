@@ -93,10 +93,10 @@
           "format": "table",
           "url": "/v1/stats/totals",
           "url_options": { "method": "GET" },
-          "columns": [{ "selector": "txs_success", "text": "Txs", "type": "number" }]
+          "columns": [{ "selector": "txs_committed", "text": "Txs", "type": "number" }]
         }
       ],
-      "title": "Total txs (success)",
+      "title": "Total txs (committed)",
       "type": "stat"
     },
     {
