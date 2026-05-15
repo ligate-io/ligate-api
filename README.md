@@ -1,6 +1,6 @@
 # ligate-api
 
-[![CI](https://github.com/ligate-io/ligate-api/actions/workflows/ci.yml/badge.svg)](https://github.com/ligate-io/ligate-api/actions/workflows/ci.yml) [![License: Apache-2.0 OR MIT](https://img.shields.io/badge/license-Apache--2.0_OR_MIT-blue.svg)](#license) [![Chain](https://img.shields.io/badge/chain-ligate--devnet--1-A7D28C.svg)](https://github.com/ligate-io/ligate-chain) [![Docs](https://img.shields.io/badge/docs-docs.ligate.io-A7D28C.svg)](https://docs.ligate.io) [![Pre-devnet](https://img.shields.io/badge/status-pre--devnet-E8833A.svg)](#status)
+[![CI](https://github.com/ligate-io/ligate-api/actions/workflows/ci.yml/badge.svg)](https://github.com/ligate-io/ligate-api/actions/workflows/ci.yml) [![License: Apache-2.0 OR MIT](https://img.shields.io/badge/license-Apache--2.0_OR_MIT-blue.svg)](#license) [![Chain](https://img.shields.io/badge/chain-ligate--devnet--1-A7D28C.svg)](https://github.com/ligate-io/ligate-chain) [![Docs](https://img.shields.io/badge/docs-docs.ligate.io-A7D28C.svg)](https://docs.ligate.io) [![Devnet](https://img.shields.io/badge/status-devnet-A7D28C.svg)](#status)
 
 Unified HTTP API for [Ligate Chain](https://github.com/ligate-io/ligate-chain). Drip (faucet) and indexer queries on a single domain. Deploys to Railway. Backs `explorer.ligate.io`.
 
@@ -163,7 +163,7 @@ The test is skipped (not failed) when `DATABASE_URL` is unset, so plain `cargo t
 
 ## Status
 
-**Pre-devnet.** Day-1 surface is `/v1/drip*` only; indexer query endpoints get fleshed out across subsequent PRs as the Postgres schema solidifies. `ligate-devnet-1` is targeted for **Q2 2026**.
+**Devnet.** Day-1 surface is `/v1/drip*` only; indexer query endpoints get fleshed out across subsequent PRs as the Postgres schema solidifies. `ligate-devnet-1` is live.
 
 ## Related repos
 
