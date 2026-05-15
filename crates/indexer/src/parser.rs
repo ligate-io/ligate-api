@@ -46,9 +46,15 @@ const KEY_BANK_TOKEN_TRANSFERRED: &str = "Bank/TokenTransferred";
 /// Event keys emitted by the Attestation module's three CallMessage
 /// paths (ligate-chain PR #297). The strings match the auto-generated
 /// `"<Module>/<VariantName>"` form the SDK's `emit_event` produces.
-const KEY_ATTESTATION_ATTESTOR_SET_REGISTERED: &str = "Attestation/AttestorSetRegistered";
-const KEY_ATTESTATION_SCHEMA_REGISTERED: &str = "Attestation/SchemaRegistered";
-const KEY_ATTESTATION_ATTESTATION_SUBMITTED: &str = "Attestation/AttestationSubmitted";
+// Chain-emitted event keys use the module's `Display` name as the
+// prefix. The attestation module reports as `AttestationModule`
+// (the `Module` suffix is `sov-modules-api`'s default; bank
+// happens to override its name to plain `Bank`, which is the
+// inconsistency we have to absorb here). If the chain unifies these
+// later the constants change here; nothing else does.
+const KEY_ATTESTATION_ATTESTOR_SET_REGISTERED: &str = "AttestationModule/AttestorSetRegistered";
+const KEY_ATTESTATION_SCHEMA_REGISTERED: &str = "AttestationModule/SchemaRegistered";
+const KEY_ATTESTATION_ATTESTATION_SUBMITTED: &str = "AttestationModule/AttestationSubmitted";
 
 /// Tx outcome from the chain receipt's `result` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,7 +250,7 @@ fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
                         attestor_set_id: d.attestor_set_id,
                         members: d.members,
                         threshold: d.threshold,
-                        registered_by: d.registered_by.user,
+                        registered_by: d.registered_by,
                     });
                 }
             }
@@ -257,10 +263,10 @@ fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
                         schema_id: d.schema_id,
                         name: d.name,
                         version: d.version,
-                        owner: d.owner.user,
+                        owner: d.owner,
                         attestor_set_id: d.attestor_set_id,
                         fee_routing_bps: d.fee_routing_bps,
-                        fee_routing_addr: d.fee_routing_addr.map(|a| a.user),
+                        fee_routing_addr: d.fee_routing_addr,
                         // `payload_shape_hash` is `Value` in the typed
                         // event payload (chain serialisation form
                         // varies across revs); stringify-then-strip
@@ -281,7 +287,7 @@ fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
                     return IndexerTx::SubmitAttestation(IndexerSubmitAttestation {
                         schema_id: d.schema_id,
                         payload_hash: d.payload_hash,
-                        submitter: d.submitter.user,
+                        submitter: d.submitter,
                         signature_count: d.signature_count,
                     });
                 }
@@ -434,24 +440,27 @@ mod tests {
 
     #[test]
     fn classify_recognises_attestor_set_registered() {
-        // Mirrors the shape `Attestation/AttestorSetRegistered`
-        // serialises to via the chain's serde-default external
-        // tagging: `{"attestor_set_registered": { ... }}`.
+        // Mirrors the shape `AttestationModule/AttestorSetRegistered`
+        // serialises to on the chain's REST surface: externally-tagged
+        // enum with the PascalCase variant name as the JSON key, and
+        // raw bech32m strings for address fields (NOT the bank module's
+        // `{"user": "lig1..."}` wrapper). The constants in this file
+        // + the serde renames in `ligate-api-types` encode that shape.
         let event = LedgerEvent {
             r#type: "event".into(),
             number: 1,
-            key: "Attestation/AttestorSetRegistered".into(),
+            key: "AttestationModule/AttestorSetRegistered".into(),
             value: serde_json::json!({
-                "attestor_set_registered": {
+                "AttestorSetRegistered": {
                     "attestor_set_id": "las1abc",
                     "members": ["lpk1m1", "lpk1m2"],
                     "threshold": 2,
-                    "registered_by": {"user": "lig1registrar"}
+                    "registered_by": "lig1registrar"
                 }
             }),
             module: ligate_api_types::ModuleRef {
                 r#type: "moduleRef".into(),
-                name: "Attestation".into(),
+                name: "AttestationModule".into(),
             },
             tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
         };
@@ -473,13 +482,13 @@ mod tests {
         let event = LedgerEvent {
             r#type: "event".into(),
             number: 1,
-            key: "Attestation/SchemaRegistered".into(),
+            key: "AttestationModule/SchemaRegistered".into(),
             value: serde_json::json!({
-                "schema_registered": {
+                "SchemaRegistered": {
                     "schema_id": "lsc1abc",
                     "name": "themisra.proof-of-prompt",
                     "version": 1,
-                    "owner": {"user": "lig1owner"},
+                    "owner": "lig1owner",
                     "attestor_set_id": "las1abc",
                     "fee_routing_bps": 0,
                     "fee_routing_addr": null,
@@ -488,7 +497,7 @@ mod tests {
             }),
             module: ligate_api_types::ModuleRef {
                 r#type: "moduleRef".into(),
-                name: "Attestation".into(),
+                name: "AttestationModule".into(),
             },
             tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
         };
@@ -514,18 +523,18 @@ mod tests {
         let event = LedgerEvent {
             r#type: "event".into(),
             number: 1,
-            key: "Attestation/AttestationSubmitted".into(),
+            key: "AttestationModule/AttestationSubmitted".into(),
             value: serde_json::json!({
-                "attestation_submitted": {
+                "AttestationSubmitted": {
                     "schema_id": "lsc1abc",
                     "payload_hash": "lph1abc",
-                    "submitter": {"user": "lig1submitter"},
+                    "submitter": "lig1submitter",
                     "signature_count": 3
                 }
             }),
             module: ligate_api_types::ModuleRef {
                 r#type: "moduleRef".into(),
-                name: "Attestation".into(),
+                name: "AttestationModule".into(),
             },
             tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
         };
@@ -550,13 +559,13 @@ mod tests {
         let semantic = LedgerEvent {
             r#type: "event".into(),
             number: 1,
-            key: "Attestation/SchemaRegistered".into(),
+            key: "AttestationModule/SchemaRegistered".into(),
             value: serde_json::json!({
-                "schema_registered": {
+                "SchemaRegistered": {
                     "schema_id": "lsc1abc",
                     "name": "x",
                     "version": 1,
-                    "owner": {"user": "lig1owner"},
+                    "owner": "lig1owner",
                     "attestor_set_id": "las1abc",
                     "fee_routing_bps": 0,
                     "fee_routing_addr": null,
@@ -565,7 +574,7 @@ mod tests {
             }),
             module: ligate_api_types::ModuleRef {
                 r#type: "moduleRef".into(),
-                name: "Attestation".into(),
+                name: "AttestationModule".into(),
             },
             tx_hash: "ltx1abc".into(),
         };
