@@ -120,8 +120,12 @@ struct TotalsResponse {
     blocks: i64,
     /// Every tx the indexer has recorded, including reverted ones.
     txs_total: i64,
-    /// Subset of `txs_total` with `outcome = 'success'`.
-    txs_success: i64,
+    /// Subset of `txs_total` that the chain committed. The indexer
+    /// writes `outcome = 'committed'` for chain `result = "successful"`
+    /// per the RFC 0002 mapping (`crates/indexer/src/parser.rs`).
+    /// Field name matches the value the indexer stores, not the
+    /// chain-side `"successful"` label.
+    txs_committed: i64,
     /// Distinct addresses seen as a tx sender or recipient.
     addresses: i64,
     /// Registered attestation schemas (`RegisterSchema` txs).
@@ -162,11 +166,11 @@ async fn compute_totals(pool: &PgPool) -> anyhow::Result<TotalsResponse> {
         .fetch_one(pool)
         .await
         .context("count txs total")?;
-    let txs_success: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE outcome = 'success'")
+    let txs_committed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE outcome = 'committed'")
             .fetch_one(pool)
             .await
-            .context("count txs success")?;
+            .context("count txs committed")?;
     let addresses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM address_summaries")
         .fetch_one(pool)
         .await
@@ -192,7 +196,7 @@ async fn compute_totals(pool: &PgPool) -> anyhow::Result<TotalsResponse> {
         indexed_at_slot: indexed_at_slot.unwrap_or(0),
         blocks,
         txs_total,
-        txs_success,
+        txs_committed,
         addresses,
         schemas,
         attestor_sets,
