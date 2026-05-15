@@ -134,6 +134,17 @@ cargo build --release --bin ligate-api # production build (locally)
 
 CI runs all four on every PR, plus a Postgres-backed e2e smoke for the indexer. See `.github/workflows/ci.yml`.
 
+### Pre-commit hooks
+
+`.pre-commit-config.yaml` runs `cargo fmt --check` on every commit so formatting drift is caught locally instead of in CI. One-time setup per clone:
+
+```bash
+brew install pre-commit         # or: pip install pre-commit
+pre-commit install              # writes .git/hooks/pre-commit
+```
+
+Skip the hook for an emergency commit with `git commit --no-verify`; the same check still re-runs in CI.
+
 ### Running the e2e indexer smoke locally
 
 The `e2e-indexer` CI job spins up Postgres in a service container, applies migrations, then runs the indexer's ingest loop against a `mockito`-stubbed chain REST surface and asserts rows landed in the DB. To reproduce locally:
