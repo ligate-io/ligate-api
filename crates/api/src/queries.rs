@@ -187,14 +187,28 @@ pub struct TxRow {
     /// RFC 0002 wants decimal-string at the wire boundary, so we
     /// surface it as `String` here rather than parsing through a
     /// numeric type that loses precision. Always the **gas fee**;
-    /// 0 on devnet (gas_price = 0). For the module-side protocol
-    /// fee see [`protocol_fee_nano`] below.
+    /// 0 in practice on devnet because `gas_used = [0, 0]` on every
+    /// batch receipt observed so far — the chain meters but doesn't
+    /// charge for execution in v0. The chain still publishes a non-
+    /// zero `gas_price` (e.g. `["7", "7"]` per dimension on
+    /// devnet-1's running config), so this column WILL go non-zero
+    /// once the chain starts metering real `gas_used`. For the
+    /// module-side protocol fee see [`protocol_fee_nano`] below.
     pub fee_paid_nano: Option<String>,
     /// Protocol fee in nano-LGT, also a decimal string. Distinct
     /// from `fee_paid_nano` (gas): this is the flat per-call-type
-    /// module fee (10/100/0.001 LGT default for attestation calls).
-    /// `None` for bank.transfer (no protocol fee) and `unknown`
-    /// kinds.
+    /// module fee. On `devnet-1` per
+    /// `chain/devnet-1/genesis/attestation.json`:
+    ///
+    /// - `register_attestor_set` = 0.05 LGT (50_000_000 nano)
+    /// - `register_schema`       = 0.10 LGT (100_000_000 nano)
+    /// - `submit_attestation`    = 0.0001 LGT (100_000 nano)
+    ///
+    /// The chain code's module-level defaults are 100x higher
+    /// (10 / 100 / 0.001 LGT) and would apply if a genesis didn't
+    /// override; both `devnet/` and `devnet-1/` genesis overrides
+    /// drop to the above values. `None` for bank.transfer (no
+    /// protocol fee) and `unknown` kinds.
     pub protocol_fee_nano: Option<String>,
     pub kind: String,
     pub details: Value,
