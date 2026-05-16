@@ -326,6 +326,13 @@ pub struct TxsListParams {
     /// Filter rows to a single `transactions.kind` value. `None`
     /// returns all kinds.
     pub kind: Option<String>,
+    /// Filter rows to a single `transactions.slot`. Combined with
+    /// pagination + `kind`, lets `/v1/blocks/{N}` detail pages fetch
+    /// EXACTLY block N's txs in one round-trip, instead of
+    /// `?limit=100` + client-side filter (which silently drops
+    /// matches for blocks older than the most recent 100 txs).
+    /// Composes with `?kind=` and pagination cursors.
+    pub block_height: Option<u64>,
 }
 
 /// `GET /v1/info` — chain identity + indexer head.
@@ -554,14 +561,24 @@ pub async fn txs_list(
         });
 
     let limit_plus_one = (limit as i64) + 1;
-    let mut rows =
-        match queries::txs_page(&state.pg, params.kind.as_deref(), before, limit_plus_one).await {
-            Ok(rs) => rs,
-            Err(e) => {
-                tracing::error!(error = %e, kind = ?params.kind, "txs_page in /v1/txs");
-                return internal_error();
-            }
-        };
+    let mut rows = match queries::txs_page(
+        &state.pg,
+        params.kind.as_deref(),
+        params.block_height,
+        before,
+        limit_plus_one,
+    )
+    .await
+    {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(
+                error = %e, kind = ?params.kind, block_height = ?params.block_height,
+                "txs_page in /v1/txs"
+            );
+            return internal_error();
+        }
+    };
 
     let has_more = rows.len() as i64 > limit as i64;
     if has_more {
@@ -1210,6 +1227,30 @@ pub async fn search(
     }
     // Prefix dispatch. Each branch only does one DB round-trip.
     let lowered = q.to_lowercase();
+
+    // Composite-id form `lsc1…:lph1…` (attestation id) checked FIRST
+    // so a query that contains a `:` doesn't get swallowed by the
+    // `lsc1` prefix branch below. Validates both halves before the
+    // DB hit so a malformed input returns `not_found` (200), not 500.
+    if let Some((schema_id, payload_hash)) = lowered.split_once(':') {
+        if schema_id.starts_with("lsc1") && payload_hash.starts_with("lph1") {
+            match queries::attestation_pair_exists(&state.pg, schema_id, payload_hash).await {
+                Ok(true) => {
+                    return Json(SearchResponse::Attestation {
+                        schema_id: schema_id.to_string(),
+                        payload_hash: payload_hash.to_string(),
+                    })
+                    .into_response();
+                }
+                Ok(false) => {} // fall through to not_found
+                Err(e) => {
+                    tracing::error!(error = %e, %lowered, "search attestation_pair_exists");
+                    return internal_error();
+                }
+            }
+        }
+    }
+
     if lowered.starts_with("lblk1") {
         match queries::slot_height_for_block_hash(&state.pg, &lowered).await {
             Ok(Some(h)) => {
