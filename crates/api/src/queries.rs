@@ -264,23 +264,34 @@ pub struct TxsCursor {
     pub position: i32,
 }
 
-/// Read a page of txs, descending by (slot, position). `before` is
-/// the cursor; `None` starts at the head. `kind_filter` narrows to a
-/// single `transactions.kind` (e.g. `"transfer"`,
-/// `"submit_attestation"`) when present; `None` returns all kinds.
+/// Read a page of txs, descending by (slot, position).
+///
+/// Optional filters compose multiplicatively — all of them can be
+/// applied simultaneously:
+/// - `kind_filter` narrows to a single `transactions.kind`
+///   (e.g. `"transfer"`, `"submit_attestation"`)
+/// - `block_height` narrows to a single `transactions.slot`
+///   (added per explorer perf brief api#48; lets
+///   `/v1/blocks/{N}` detail pages fetch EXACTLY block N's txs in
+///   one round-trip instead of `?limit=100` + client-side filter
+///   that silently misses blocks > 100-ago)
+/// - `before` is the pagination cursor; `None` starts at the head
+///
 /// Fetches `limit + 1` rows for has-more detection (same trick as
 /// `slots_page`).
+///
+/// Implementation: collapsed from a 4-way `match` dispatch (was
+/// already a tight squeeze; adding `block_height` would have made
+/// it 8-way) into a single query with `($N::TYPE IS NULL OR ...)`
+/// guards. Postgres short-circuits the NULL branch at plan time so
+/// the unused predicates don't cost anything.
 pub async fn txs_page(
     pool: &PgPool,
     kind_filter: Option<&str>,
+    block_height: Option<u64>,
     before: Option<TxsCursor>,
     limit_plus_one: i64,
 ) -> sqlx::Result<Vec<TxRow>> {
-    // Four-way dispatch on `(kind_filter present, cursor present)`.
-    // SQL binds a known argument count per query so we keep four
-    // explicit branches; building the WHERE dynamically with
-    // `query_builder` would also work but loses the static
-    // bind-typing this gives us.
     #[allow(clippy::type_complexity)]
     type TxTuple = (
         String,
@@ -298,78 +309,30 @@ pub async fn txs_page(
         Option<String>,
         Option<DateTime<Utc>>,
     );
-    let rows: Vec<TxTuple> = match (kind_filter, before) {
-        (Some(k), Some(c)) => {
-            sqlx::query_as(
-                "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
-                        t.fee_paid_nano, t.protocol_fee_nano,
-                        t.kind, t.details, t.outcome, t.revert_reason,
-                        s.hash, s.timestamp
-                 FROM transactions t
-                 JOIN slots s ON s.height = t.slot
-                 WHERE t.kind = $1
-                   AND (t.slot, t.position) < ($2, $3)
-                 ORDER BY t.slot DESC, t.position DESC
-                 LIMIT $4",
-            )
-            .bind(k)
-            .bind(c.slot)
-            .bind(c.position)
-            .bind(limit_plus_one)
-            .fetch_all(pool)
-            .await?
-        }
-        (Some(k), None) => {
-            sqlx::query_as(
-                "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
-                        t.fee_paid_nano, t.protocol_fee_nano,
-                        t.kind, t.details, t.outcome, t.revert_reason,
-                        s.hash, s.timestamp
-                 FROM transactions t
-                 JOIN slots s ON s.height = t.slot
-                 WHERE t.kind = $1
-                 ORDER BY t.slot DESC, t.position DESC
-                 LIMIT $2",
-            )
-            .bind(k)
-            .bind(limit_plus_one)
-            .fetch_all(pool)
-            .await?
-        }
-        (None, Some(c)) => {
-            sqlx::query_as(
-                "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
-                        t.fee_paid_nano, t.protocol_fee_nano,
-                        t.kind, t.details, t.outcome, t.revert_reason,
-                        s.hash, s.timestamp
-                 FROM transactions t
-                 JOIN slots s ON s.height = t.slot
-                 WHERE (t.slot, t.position) < ($1, $2)
-                 ORDER BY t.slot DESC, t.position DESC
-                 LIMIT $3",
-            )
-            .bind(c.slot)
-            .bind(c.position)
-            .bind(limit_plus_one)
-            .fetch_all(pool)
-            .await?
-        }
-        (None, None) => {
-            sqlx::query_as(
-                "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
-                        t.fee_paid_nano, t.protocol_fee_nano,
-                        t.kind, t.details, t.outcome, t.revert_reason,
-                        s.hash, s.timestamp
-                 FROM transactions t
-                 JOIN slots s ON s.height = t.slot
-                 ORDER BY t.slot DESC, t.position DESC
-                 LIMIT $1",
-            )
-            .bind(limit_plus_one)
-            .fetch_all(pool)
-            .await?
-        }
+    let (cursor_slot, cursor_position): (Option<i64>, Option<i32>) = match before {
+        Some(c) => (Some(c.slot), Some(c.position)),
+        None => (None, None),
     };
+    let rows: Vec<TxTuple> = sqlx::query_as(
+        "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
+                t.fee_paid_nano, t.protocol_fee_nano,
+                t.kind, t.details, t.outcome, t.revert_reason,
+                s.hash, s.timestamp
+         FROM transactions t
+         JOIN slots s ON s.height = t.slot
+         WHERE ($1::TEXT   IS NULL OR t.kind = $1)
+           AND ($2::BIGINT IS NULL OR t.slot = $2)
+           AND ($3::BIGINT IS NULL OR (t.slot, t.position) < ($3, $4))
+         ORDER BY t.slot DESC, t.position DESC
+         LIMIT $5",
+    )
+    .bind(kind_filter)
+    .bind(block_height.map(|h| h as i64))
+    .bind(cursor_slot)
+    .bind(cursor_position)
+    .bind(limit_plus_one)
+    .fetch_all(pool)
+    .await?;
 
     Ok(rows.into_iter().map(tx_row_from_tuple).collect())
 }
@@ -1047,21 +1010,47 @@ pub async fn address_exists(pool: &PgPool, address: &str) -> sqlx::Result<bool> 
 }
 
 /// Lightweight "does this schema id exist" check.
+///
+/// `SELECT EXISTS(...)` rather than `SELECT 1` because Postgres's `1`
+/// literal types as `int4` and sqlx is strict about decode types —
+/// previously `Option<i64>` triggered a runtime decode error and the
+/// handler 500ed on every `/v1/search?q=lsc1…` call. `EXISTS` always
+/// returns a clean `bool`, no fragile type casts.
 pub async fn schema_exists(pool: &PgPool, id: &str) -> sqlx::Result<bool> {
-    let r: Option<i64> = sqlx::query_scalar("SELECT 1 FROM schemas WHERE id = $1")
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schemas WHERE id = $1)")
         .bind(id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(r.is_some())
+        .fetch_one(pool)
+        .await
 }
 
-/// Lightweight "does this attestor-set id exist" check.
+/// Lightweight "does this attestor-set id exist" check. Same
+/// `EXISTS(...)` pattern as `schema_exists` for the same reason.
 pub async fn attestor_set_exists(pool: &PgPool, id: &str) -> sqlx::Result<bool> {
-    let r: Option<i64> = sqlx::query_scalar("SELECT 1 FROM attestor_sets WHERE id = $1")
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM attestor_sets WHERE id = $1)")
         .bind(id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(r.is_some())
+        .fetch_one(pool)
+        .await
+}
+
+/// "Does this exact (schema_id, payload_hash) attestation exist?" —
+/// used by `/v1/search` when the input is a composite
+/// `lsc1…:lph1…` form. Different from `attestation_by_payload_hash`
+/// which scans all schemas for a given payload.
+pub async fn attestation_pair_exists(
+    pool: &PgPool,
+    schema_id: &str,
+    payload_hash: &str,
+) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM attestations
+            WHERE schema_id = $1 AND payload_hash = $2
+        )",
+    )
+    .bind(schema_id)
+    .bind(payload_hash)
+    .fetch_one(pool)
+    .await
 }
 
 /// "Which schema's attestation has this payload hash?" — used by
