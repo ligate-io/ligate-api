@@ -60,7 +60,27 @@ pub async fn write_chain_identity(pool: &PgPool, info: &RollupInfo) -> Result<()
 
 /// Upsert one slot row. Idempotent on (height) primary key, so
 /// re-runs of backfill don't create duplicates.
-pub async fn upsert_slot(pool: &PgPool, slot: &SlotResponse) -> Result<()> {
+///
+/// `proposer` is the Celestia `da_address` of the sequencer that
+/// submitted the slot's first batch to DA. The caller (ingest loop)
+/// extracts it from `batch.receipt.da_address`. `None` if the slot
+/// has no batches or the batch fetch failed; column stays NULL.
+///
+/// **prev_hash derivation.** Chain's slot JSON doesn't include a
+/// prev_hash field today (verified live across multiple slots on
+/// rpc.ligate.io). When `slot.prev_hash` is `None`, this helper
+/// derives it via a lookup against slot N-1's stored `hash`. For
+/// genesis (`height = 0`) it's `None` by definition. The lookup is
+/// a primary-key index hit (`slots.height`) so cost is O(1).
+///
+/// **finalized_at stamping.** The chain emits `finality_status`
+/// as `"pending"` or `"finalized"`. We mirror it onto the row.
+/// When a row transitions pending → finalized (observed at upsert
+/// or re-poll time), we stamp `finalized_at = NOW()`. This is an
+/// observation, not the true chain finalization moment (chain
+/// doesn't emit that), but it's within one indexer poll interval
+/// of truth — accurate enough for `/v1/stats/finality` percentiles.
+pub async fn upsert_slot(pool: &PgPool, slot: &SlotResponse, proposer: Option<&str>) -> Result<()> {
     // Chain emits `slot.timestamp` as Unix MILLISECONDS (verified
     // against localnet: 1778527856952 → 2026-05-11T...). Earlier
     // code parsed via `timestamp_opt(s, 0)` which treats the input
@@ -73,30 +93,142 @@ pub async fn upsert_slot(pool: &PgPool, slot: &SlotResponse) -> Result<()> {
 
     let raw = serde_json::to_value(slot).unwrap_or(serde_json::Value::Null);
 
+    // prev_hash: prefer the chain-provided value (forward-compat for
+    // when chain starts emitting the field), otherwise look up slot
+    // N-1's hash. None for genesis (height 0) and for slots whose
+    // predecessor isn't yet indexed (which shouldn't normally happen
+    // because we ingest sequentially, but defensible against
+    // restart-mid-backfill).
+    let prev_hash: Option<String> = match slot.prev_hash.as_deref() {
+        Some(h) => Some(h.to_string()),
+        None if slot.number > 0 => {
+            sqlx::query_scalar::<_, String>("SELECT hash FROM slots WHERE height = $1")
+                .bind((slot.number - 1) as i64)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    };
+
     sqlx::query(
-        "INSERT INTO slots (height, hash, prev_hash, state_root, timestamp, batch_count, tx_count, raw)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "INSERT INTO slots (
+            height, hash, prev_hash, state_root, timestamp,
+            batch_count, tx_count, proposer, finality_status, finalized_at, raw
+         )
+         VALUES (
+            $1, $2, $3, $4, $5,
+            $6, $7, $8, $9,
+            -- New rows stamp finalized_at immediately if the chain
+            -- already reports the slot as finalized (typical for
+            -- backfill of historical slots). For new live slots the
+            -- chain reports 'pending' first, so this is NULL and
+            -- the re-poll loop will stamp NOW() on the flip.
+            CASE WHEN $9 = 'finalized' THEN NOW() ELSE NULL END,
+            $10
+         )
          ON CONFLICT (height) DO UPDATE SET
-            hash        = EXCLUDED.hash,
-            prev_hash   = EXCLUDED.prev_hash,
-            state_root  = EXCLUDED.state_root,
-            timestamp   = EXCLUDED.timestamp,
-            batch_count = EXCLUDED.batch_count,
-            tx_count    = EXCLUDED.tx_count,
-            raw         = EXCLUDED.raw,
-            indexed_at  = NOW()",
+            hash             = EXCLUDED.hash,
+            -- Only overwrite prev_hash if EXCLUDED has one. Preserves
+            -- a previously-derived value if a re-fetch returns NULL.
+            prev_hash        = COALESCE(EXCLUDED.prev_hash, slots.prev_hash),
+            state_root       = EXCLUDED.state_root,
+            timestamp        = EXCLUDED.timestamp,
+            batch_count      = EXCLUDED.batch_count,
+            tx_count         = EXCLUDED.tx_count,
+            -- Same COALESCE pattern for proposer: don't blank out a
+            -- known value if a later upsert (e.g. re-poll) doesn't
+            -- carry batch data.
+            proposer         = COALESCE(EXCLUDED.proposer, slots.proposer),
+            finality_status  = EXCLUDED.finality_status,
+            -- Stamp finalized_at exactly once, on the transition
+            -- from non-'finalized' to 'finalized'. Subsequent
+            -- finalized→finalized upserts preserve the original
+            -- stamp (don't overwrite with a later NOW()).
+            finalized_at     = CASE
+                WHEN slots.finality_status IS DISTINCT FROM 'finalized'
+                 AND EXCLUDED.finality_status = 'finalized'
+                THEN NOW()
+                ELSE slots.finalized_at
+            END,
+            raw              = EXCLUDED.raw,
+            indexed_at       = NOW()",
     )
     .bind(slot.number as i64)
     .bind(&slot.hash)
-    .bind(slot.prev_hash.as_deref())
+    .bind(prev_hash.as_deref())
     .bind(slot.state_root.as_deref())
     .bind(timestamp)
     .bind(slot.batch_count.unwrap_or(0) as i32)
     .bind(slot.tx_count.unwrap_or(0) as i32)
+    .bind(proposer)
+    .bind(slot.finality_status.as_deref())
     .bind(raw)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Detect and apply pending → finalized transitions for slots
+/// already in the DB. Called by the indexer's background re-poll
+/// task on a fixed interval (typically 10s). Cheap because:
+///
+/// - The candidate set is bounded (Mocha finalizes within ~3 slots
+///   so `finality_status = 'pending'` holds maybe 5 rows at a time)
+/// - The partial index `slots_finality_pending_idx` covers the
+///   candidate query directly — no full-table scan
+/// - The chain-side fetch is one HTTP per candidate
+///
+/// Returns the number of rows whose status flipped this pass, for
+/// the caller's metrics / debug logging.
+///
+/// **finalized_at semantics.** When the chain reports a slot as
+/// finalized that we previously had as pending, we stamp `NOW()` —
+/// not the chain's timestamp. This is the *observation* instant
+/// (the moment the indexer noticed the flip), which lags the true
+/// finalization instant by up to one poll interval. For
+/// `/v1/stats/finality` percentile sampling this is the worst-case
+/// 10s of upward bias on the latency distribution, acceptable as
+/// the v0 "observed" mode. True finalization time would require
+/// chain-side `BlobExecutionStatus` subscription (tracked as a
+/// followup; not in this PR).
+pub async fn flip_pending_slots(pool: &PgPool, rechecked: &[(u64, Option<&str>)]) -> Result<u64> {
+    if rechecked.is_empty() {
+        return Ok(0);
+    }
+    let mut flipped: u64 = 0;
+    for (height, status) in rechecked {
+        if !matches!(status, Some("finalized")) {
+            continue;
+        }
+        let res = sqlx::query(
+            "UPDATE slots
+             SET finality_status = 'finalized',
+                 finalized_at    = NOW(),
+                 indexed_at      = NOW()
+             WHERE height = $1
+               AND finality_status = 'pending'",
+        )
+        .bind(*height as i64)
+        .execute(pool)
+        .await?;
+        flipped += res.rows_affected();
+    }
+    Ok(flipped)
+}
+
+/// Read the set of heights currently in `'pending'` state. Used by
+/// the re-poll loop to know which slots to refetch on each tick.
+/// Index-only scan against `slots_finality_pending_idx`; expected
+/// to return a handful of rows under normal operation.
+pub async fn pending_slot_heights(pool: &PgPool) -> Result<Vec<u64>> {
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "SELECT height FROM slots WHERE finality_status = 'pending' ORDER BY height ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(h,)| h as u64).collect())
 }
 
 /// Insert one parsed transaction into the `transactions` table.
