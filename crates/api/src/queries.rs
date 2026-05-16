@@ -1048,12 +1048,18 @@ pub async fn slot_height_for_block_hash(pool: &PgPool, hash: &str) -> sqlx::Resu
 /// only return `true`/`false` because the search handler just needs
 /// to know whether to redirect to `/v1/addresses/{addr}`; the actual
 /// summary is fetched on that follow-up call.
+///
+/// `SELECT EXISTS(...)` rather than `SELECT 1` — same fragile-decode
+/// reason called out on `schema_exists` below (sqlx couldn't decode
+/// Postgres's `1` int4 literal into the `Option<i64>` we'd previously
+/// declared, and the handler 500ed on every `/v1/search?q=lig1…`
+/// call). #50 fixed schemas + attestor-sets; this catches addresses,
+/// which the smoke pass surfaced 2026-05-16.
 pub async fn address_exists(pool: &PgPool, address: &str) -> sqlx::Result<bool> {
-    let r: Option<i64> = sqlx::query_scalar("SELECT 1 FROM address_summaries WHERE address = $1")
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM address_summaries WHERE address = $1)")
         .bind(address)
-        .fetch_optional(pool)
-        .await?;
-    Ok(r.is_some())
+        .fetch_one(pool)
+        .await
 }
 
 /// Lightweight "does this schema id exist" check.
