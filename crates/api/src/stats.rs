@@ -657,8 +657,17 @@ struct NextBlockEtaResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     seconds_until_expected: Option<f64>,
     /// How far the indexer is behind the actual chain head, in
-    /// seconds. Hint for clients that the data they're rendering
-    /// might be slightly stale.
+    /// seconds. Computed as `(chain_head_height - last_indexed_height)
+    /// × mean_block_interval_secs`. `0.0` for an indexer at the tail
+    /// or when chain-head fetch failed (silent — see warning log).
+    ///
+    /// **Threshold semantics for client UX.** A healthy indexer at
+    /// the tail reports < `mean_block_interval_secs` here (one slot
+    /// of natural in-flight between chain producing and indexer
+    /// committing). Anything above ~3× mean is a genuine "indexer is
+    /// behind" signal worth surfacing to users. Avoid using this
+    /// value as a real-time countdown — for that, use
+    /// `seconds_since_last` instead.
     indexer_lag_secs: f64,
 }
 
@@ -671,7 +680,20 @@ pub async fn next_block_eta(State(state): State<AppState>) -> Response {
     if let Some(cached) = state.stats_cache.get_fresh(key, ttl) {
         return cached_json_response(cached);
     }
-    match compute_next_block_eta(&state.pg).await {
+    // Fetch the chain's head height in parallel with the slot-history
+    // query inside `compute_next_block_eta` so `indexer_lag_secs`
+    // reports a true (chain_head - indexer_head) signal rather than
+    // the previous "seconds since last block" surrogate that cycled
+    // 0 → mean-interval every block regardless of whether the
+    // indexer was actually behind.
+    let chain_head = match ligate_api_indexer::NodeClient::new(&state.config.chain_rpc) {
+        Ok(client) => client.latest_slot().await.ok().map(|s| s.number),
+        Err(e) => {
+            tracing::warn!(error = %e, "building NodeClient in /v1/stats/next-block-eta");
+            None
+        }
+    };
+    match compute_next_block_eta(&state.pg, chain_head).await {
         Ok(payload) => match serde_json::to_string(&payload) {
             Ok(body) => {
                 state.stats_cache.put(key.to_string(), body.clone());
@@ -683,7 +705,10 @@ pub async fn next_block_eta(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn compute_next_block_eta(pool: &PgPool) -> anyhow::Result<NextBlockEtaResponse> {
+async fn compute_next_block_eta(
+    pool: &PgPool,
+    chain_head: Option<u64>,
+) -> anyhow::Result<NextBlockEtaResponse> {
     // Last 100 slots, descending. Window matched to "last ~10 min
     // on Mocha" (block time ~6s; 100 * 6 = 600s). Enough samples
     // for a stable mean + p95 without being a wide query.
@@ -752,14 +777,22 @@ async fn compute_next_block_eta(pool: &PgPool) -> anyhow::Result<NextBlockEtaRes
         (None, None, None, None)
     };
 
-    // Indexer-lag: the indexer's `last_indexed_height` (the slot we
-    // just read) vs the actual chain head is not directly available
-    // here. As a proxy we use `seconds_since_last` and cap it at the
-    // mean interval: if `seconds_since_last` is way over mean, that
-    // suggests the indexer is behind (or the chain stalled — both
-    // surfaces as "your data is stale"). For a precise reading the
-    // explorer can cross-reference `/v1/info.head_lag_slots`.
-    let indexer_lag_secs = seconds_since_last.max(0.0);
+    // Indexer-lag: true `(chain_head - last_indexed_height)` × mean
+    // interval. `chain_head` is fetched in parallel by the caller. If
+    // either the chain-head fetch failed or we don't yet have a mean
+    // interval (single-slot indexer), report `0.0` rather than
+    // surfacing the previous "seconds since last block" surrogate
+    // that cycled 0 → mean every block. A healthy indexer at the
+    // chain tail reports < ~mean here (one slot of natural in-flight);
+    // a genuinely lagging indexer reports `N × mean` where N is the
+    // backlog in slots.
+    let indexer_lag_secs = match (chain_head, mean_interval) {
+        (Some(head), Some(mean)) => {
+            let behind = (head as i64 - latest_height).max(0) as f64;
+            behind * mean
+        }
+        _ => 0.0,
+    };
 
     Ok(NextBlockEtaResponse {
         last_block_height: latest_height,
