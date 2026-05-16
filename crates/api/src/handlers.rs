@@ -271,6 +271,27 @@ pub struct PaginationParams {
     pub before: Option<String>,
 }
 
+/// `/v1/txs` query params: pagination plus an optional `?kind=`
+/// filter so the explorer can render kind-specific views (e.g.
+/// "only `submit_attestation` txs") without dragging unrelated
+/// rows over the wire.
+///
+/// **`kind` semantics.** The value must match the indexer's
+/// canonical `kind` string verbatim (`transfer`,
+/// `register_attestor_set`, `register_schema`,
+/// `submit_attestation`, `unknown`). Unknown values silently
+/// return zero rows; we don't 400-on-bad-kind so a future chain
+/// runtime call that adds a new kind doesn't break older clients
+/// passing the new name.
+#[derive(Debug, Deserialize)]
+pub struct TxsListParams {
+    pub limit: Option<u32>,
+    pub before: Option<String>,
+    /// Filter rows to a single `transactions.kind` value. `None`
+    /// returns all kinds.
+    pub kind: Option<String>,
+}
+
 /// `GET /v1/info` — chain identity + indexer head.
 ///
 /// Proxies `GET /v1/rollup/info` from the chain, augments with the
@@ -456,7 +477,7 @@ fn internal_error() -> axum::response::Response {
 /// position DESC)`. Cursor encodes the last row's `(slot, idx)`.
 pub async fn txs_list(
     State(state): State<AppState>,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<TxsListParams>,
 ) -> impl IntoResponse {
     let limit = cursor::resolve_limit(params.limit);
     let before = params
@@ -469,13 +490,14 @@ pub async fn txs_list(
         });
 
     let limit_plus_one = (limit as i64) + 1;
-    let mut rows = match queries::txs_page(&state.pg, before, limit_plus_one).await {
-        Ok(rs) => rs,
-        Err(e) => {
-            tracing::error!(error = %e, "txs_page in /v1/txs");
-            return internal_error();
-        }
-    };
+    let mut rows =
+        match queries::txs_page(&state.pg, params.kind.as_deref(), before, limit_plus_one).await {
+            Ok(rs) => rs,
+            Err(e) => {
+                tracing::error!(error = %e, kind = ?params.kind, "txs_page in /v1/txs");
+                return internal_error();
+            }
+        };
 
     let has_more = rows.len() as i64 > limit as i64;
     if has_more {
@@ -548,6 +570,7 @@ fn tx_row_to_response(row: queries::TxRow) -> TxResponse {
         sender_pubkey: row.sender_pubkey,
         nonce: row.nonce,
         fee_paid_nano: row.fee_paid_nano,
+        protocol_fee_nano: row.protocol_fee_nano,
         kind: row.kind,
         details: row.details,
         outcome: row.outcome,

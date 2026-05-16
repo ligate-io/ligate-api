@@ -133,9 +133,20 @@ pub struct TxResponse {
     pub sender_pubkey: Option<String>,
     /// Account nonce. `null` in v0 — same reason as `sender_pubkey`.
     pub nonce: Option<i64>,
-    /// Fee paid in nano-LGT (u128 as decimal string per RFC 0002).
-    /// `null` in v0 — chain elides fee envelope.
+    /// Gas fee paid in nano-LGT (u128 as decimal string per RFC 0002).
+    /// Zero on devnet (`gas_price = 0` in genesis). `null` if the
+    /// chain elided the fee envelope at indexing time.
     pub fee_paid_nano: Option<String>,
+    /// Protocol fee paid in nano-LGT (u128 as decimal string).
+    /// Distinct from `fee_paid_nano` (which is the chain-metered gas
+    /// fee). This is the flat per-call-type module fee that routes to
+    /// treasury (and optionally a builder share via the schema's
+    /// `fee_routing_bps`). `null` for tx kinds that have no protocol
+    /// fee (`transfer`), and for `unknown` kinds the indexer can't
+    /// account for. Attestation-module calls always have a non-zero
+    /// value here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol_fee_nano: Option<String>,
     /// Tagged-union discriminator. Values per RFC 0002 §"Tx kinds":
     /// `"transfer" | "register_attestor_set" | "register_schema" |
     /// "submit_attestation" | "unknown"`.

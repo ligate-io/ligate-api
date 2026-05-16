@@ -204,28 +204,52 @@ pub async fn insert_transaction(
         IndexerTx::Unknown { .. } => None,
     };
 
+    // Protocol fee: flat per-kind constant from devnet-1's
+    // `chain/devnet-1/genesis/attestation.json`. For testnet/mainnet
+    // these values change per governance; the indexer should ideally
+    // extract from the `Bank/TokenTransferred` event(s) the chain
+    // emits alongside attestation events so the value is always
+    // genesis-config-accurate. Filed as a follow-up; the hardcoded
+    // table here matches the live devnet-1 config and the backfill
+    // in migration 0005.
+    //
+    // Bound as `Option<i64>` because all four values fit in i64 and
+    // Postgres implicit-casts to NUMERIC(78,0). `None` for `unknown`
+    // because we don't have a confident value.
+    let protocol_fee_nano: Option<i64> = match &classified.kind {
+        IndexerTx::Transfer(_) => Some(0),
+        IndexerTx::RegisterAttestorSet(_) => Some(50_000_000),
+        IndexerTx::RegisterSchema(_) => Some(100_000_000),
+        IndexerTx::SubmitAttestation(_) => Some(100_000),
+        IndexerTx::Unknown { .. } => None,
+    };
+
     sqlx::query(
         "INSERT INTO transactions (
-            hash, slot, position, sender, sender_pubkey, nonce, fee_paid_nano,
+            hash, slot, position, sender, sender_pubkey, nonce,
+            fee_paid_nano, protocol_fee_nano,
             kind, details, raw, outcome, revert_reason
          ) VALUES (
-            $1, $2, $3, $4, NULL, NULL, NULL,
-            $5, $6, $7, $8, NULL
+            $1, $2, $3, $4, NULL, NULL,
+            NULL, $5,
+            $6, $7, $8, $9, NULL
          )
          ON CONFLICT (hash) DO UPDATE SET
-            slot         = EXCLUDED.slot,
-            position     = EXCLUDED.position,
-            sender       = EXCLUDED.sender,
-            kind         = EXCLUDED.kind,
-            details      = EXCLUDED.details,
-            raw          = EXCLUDED.raw,
-            outcome      = EXCLUDED.outcome,
-            indexed_at   = NOW()",
+            slot              = EXCLUDED.slot,
+            position          = EXCLUDED.position,
+            sender            = EXCLUDED.sender,
+            protocol_fee_nano = EXCLUDED.protocol_fee_nano,
+            kind              = EXCLUDED.kind,
+            details           = EXCLUDED.details,
+            raw               = EXCLUDED.raw,
+            outcome           = EXCLUDED.outcome,
+            indexed_at        = NOW()",
     )
     .bind(&classified.hash)
     .bind(slot_height as i64)
     .bind(position_in_block)
     .bind(sender)
+    .bind(protocol_fee_nano)
     .bind(kind)
     .bind(details)
     .bind(raw)

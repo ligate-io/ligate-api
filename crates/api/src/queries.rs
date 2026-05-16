@@ -177,8 +177,16 @@ pub struct TxRow {
     /// Postgres `NUMERIC(78,0)` exposed as `String` via `bigdecimal`.
     /// RFC 0002 wants decimal-string at the wire boundary, so we
     /// surface it as `String` here rather than parsing through a
-    /// numeric type that loses precision.
+    /// numeric type that loses precision. Always the **gas fee**;
+    /// 0 on devnet (gas_price = 0). For the module-side protocol
+    /// fee see [`protocol_fee_nano`] below.
     pub fee_paid_nano: Option<String>,
+    /// Protocol fee in nano-LGT, also a decimal string. Distinct
+    /// from `fee_paid_nano` (gas): this is the flat per-call-type
+    /// module fee (10/100/0.001 LGT default for attestation calls).
+    /// `None` for bank.transfer (no protocol fee) and `unknown`
+    /// kinds.
+    pub protocol_fee_nano: Option<String>,
     pub kind: String,
     pub details: Value,
     pub outcome: String,
@@ -201,6 +209,7 @@ pub async fn tx_by_hash(pool: &PgPool, hash: &str) -> sqlx::Result<Option<TxRow>
             Option<String>,
             Option<i64>,
             Option<sqlx::types::BigDecimal>,
+            Option<sqlx::types::BigDecimal>,
             String,
             Value,
             String,
@@ -210,7 +219,8 @@ pub async fn tx_by_hash(pool: &PgPool, hash: &str) -> sqlx::Result<Option<TxRow>
         ),
     >(
         "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
-                t.fee_paid_nano, t.kind, t.details, t.outcome, t.revert_reason,
+                t.fee_paid_nano, t.protocol_fee_nano,
+                t.kind, t.details, t.outcome, t.revert_reason,
                 s.hash, s.timestamp
          FROM transactions t
          JOIN slots s ON s.height = t.slot
@@ -232,35 +242,82 @@ pub struct TxsCursor {
 }
 
 /// Read a page of txs, descending by (slot, position). `before` is
-/// the cursor; `None` starts at the head. Fetches `limit + 1` rows
-/// for has-more detection (same trick as `slots_page`).
+/// the cursor; `None` starts at the head. `kind_filter` narrows to a
+/// single `transactions.kind` (e.g. `"transfer"`,
+/// `"submit_attestation"`) when present; `None` returns all kinds.
+/// Fetches `limit + 1` rows for has-more detection (same trick as
+/// `slots_page`).
 pub async fn txs_page(
     pool: &PgPool,
+    kind_filter: Option<&str>,
     before: Option<TxsCursor>,
     limit_plus_one: i64,
 ) -> sqlx::Result<Vec<TxRow>> {
-    let rows = match before {
-        Some(c) => {
-            sqlx::query_as::<
-                _,
-                (
-                    String,
-                    i64,
-                    i32,
-                    Option<String>,
-                    Option<String>,
-                    Option<i64>,
-                    Option<sqlx::types::BigDecimal>,
-                    String,
-                    Value,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                    Option<DateTime<Utc>>,
-                ),
-            >(
+    // Four-way dispatch on `(kind_filter present, cursor present)`.
+    // SQL binds a known argument count per query so we keep four
+    // explicit branches; building the WHERE dynamically with
+    // `query_builder` would also work but loses the static
+    // bind-typing this gives us.
+    #[allow(clippy::type_complexity)]
+    type TxTuple = (
+        String,
+        i64,
+        i32,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<sqlx::types::BigDecimal>,
+        Option<sqlx::types::BigDecimal>,
+        String,
+        Value,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<DateTime<Utc>>,
+    );
+    let rows: Vec<TxTuple> = match (kind_filter, before) {
+        (Some(k), Some(c)) => {
+            sqlx::query_as(
                 "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
-                        t.fee_paid_nano, t.kind, t.details, t.outcome, t.revert_reason,
+                        t.fee_paid_nano, t.protocol_fee_nano,
+                        t.kind, t.details, t.outcome, t.revert_reason,
+                        s.hash, s.timestamp
+                 FROM transactions t
+                 JOIN slots s ON s.height = t.slot
+                 WHERE t.kind = $1
+                   AND (t.slot, t.position) < ($2, $3)
+                 ORDER BY t.slot DESC, t.position DESC
+                 LIMIT $4",
+            )
+            .bind(k)
+            .bind(c.slot)
+            .bind(c.position)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+        (Some(k), None) => {
+            sqlx::query_as(
+                "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
+                        t.fee_paid_nano, t.protocol_fee_nano,
+                        t.kind, t.details, t.outcome, t.revert_reason,
+                        s.hash, s.timestamp
+                 FROM transactions t
+                 JOIN slots s ON s.height = t.slot
+                 WHERE t.kind = $1
+                 ORDER BY t.slot DESC, t.position DESC
+                 LIMIT $2",
+            )
+            .bind(k)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+        (None, Some(c)) => {
+            sqlx::query_as(
+                "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
+                        t.fee_paid_nano, t.protocol_fee_nano,
+                        t.kind, t.details, t.outcome, t.revert_reason,
                         s.hash, s.timestamp
                  FROM transactions t
                  JOIN slots s ON s.height = t.slot
@@ -274,27 +331,11 @@ pub async fn txs_page(
             .fetch_all(pool)
             .await?
         }
-        None => {
-            sqlx::query_as::<
-                _,
-                (
-                    String,
-                    i64,
-                    i32,
-                    Option<String>,
-                    Option<String>,
-                    Option<i64>,
-                    Option<sqlx::types::BigDecimal>,
-                    String,
-                    Value,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                    Option<DateTime<Utc>>,
-                ),
-            >(
+        (None, None) => {
+            sqlx::query_as(
                 "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
-                        t.fee_paid_nano, t.kind, t.details, t.outcome, t.revert_reason,
+                        t.fee_paid_nano, t.protocol_fee_nano,
+                        t.kind, t.details, t.outcome, t.revert_reason,
                         s.hash, s.timestamp
                  FROM transactions t
                  JOIN slots s ON s.height = t.slot
@@ -602,6 +643,7 @@ fn tx_row_from_tuple(
         Option<String>,
         Option<i64>,
         Option<sqlx::types::BigDecimal>,
+        Option<sqlx::types::BigDecimal>,
         String,
         Value,
         String,
@@ -618,6 +660,7 @@ fn tx_row_from_tuple(
         sender_pubkey,
         nonce,
         fee_paid_nano,
+        protocol_fee_nano,
         kind,
         details,
         outcome,
@@ -636,6 +679,7 @@ fn tx_row_from_tuple(
         // a `1000000000` row comes back as `"1000000000"`, not
         // `"1000000000.0"` (BigDecimal's default Display).
         fee_paid_nano: fee_paid_nano.map(|bd| bd.with_scale(0).to_string()),
+        protocol_fee_nano: protocol_fee_nano.map(|bd| bd.with_scale(0).to_string()),
         kind,
         details,
         outcome,
