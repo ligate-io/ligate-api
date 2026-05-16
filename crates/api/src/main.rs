@@ -251,6 +251,10 @@ async fn main() -> Result<()> {
         .route("/v1/stats/active-addresses", get(stats::active_addresses))
         .route("/v1/stats/new-wallets-daily", get(stats::new_wallets_daily))
         .route("/v1/stats/tx-rate-daily", get(stats::tx_rate_daily))
+        .route(
+            "/v1/stats/attestations-daily",
+            get(stats::attestations_daily),
+        )
         .route("/v1/stats/top-holders", get(stats::top_holders))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
