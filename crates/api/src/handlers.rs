@@ -307,6 +307,26 @@ pub struct PaginationParams {
     pub before: Option<String>,
 }
 
+/// `/v1/schemas` query params: pagination plus an optional
+/// `?attestor_set_id=` filter so the explorer's `/attestor-set/{id}`
+/// detail page can fetch ONLY the schemas bound to that set, instead
+/// of `?limit=100` + client-side filter. Tier 1.2 of explorer perf
+/// brief (api#48).
+///
+/// **Filter value.** Must be a verbatim bech32m `las1...` string.
+/// Unknown values silently return zero rows (no 400) for the same
+/// reason as `?kind=` on `/v1/txs`: future schema runtime changes
+/// shouldn't break older clients passing legitimate-looking ids
+/// that don't resolve.
+#[derive(Debug, Deserialize)]
+pub struct SchemasListParams {
+    pub limit: Option<u32>,
+    pub before: Option<String>,
+    /// Filter rows to a single `attestor_set_id`. `None` returns
+    /// all schemas across all attestor sets.
+    pub attestor_set_id: Option<String>,
+}
+
 /// `/v1/txs` query params: pagination plus an optional `?kind=`
 /// filter so the explorer can render kind-specific views (e.g.
 /// "only `submit_attestation` txs") without dragging unrelated
@@ -808,7 +828,7 @@ pub async fn address_txs(
 /// DESC)`. Cursor encodes the last row's `(slot, id)`.
 pub async fn schemas_list(
     State(state): State<AppState>,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<SchemasListParams>,
 ) -> impl IntoResponse {
     let limit = cursor::resolve_limit(params.limit);
     let before = params
@@ -821,10 +841,20 @@ pub async fn schemas_list(
         });
 
     let limit_plus_one = (limit as i64) + 1;
-    let mut rows = match queries::schemas_page(&state.pg, before, limit_plus_one).await {
+    let mut rows = match queries::schemas_page(
+        &state.pg,
+        params.attestor_set_id.as_deref(),
+        before,
+        limit_plus_one,
+    )
+    .await
+    {
         Ok(rs) => rs,
         Err(e) => {
-            tracing::error!(error = %e, "schemas_page in /v1/schemas");
+            tracing::error!(
+                error = %e, attestor_set_id = ?params.attestor_set_id,
+                "schemas_page in /v1/schemas"
+            );
             return internal_error();
         }
     };

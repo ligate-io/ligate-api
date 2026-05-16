@@ -495,48 +495,46 @@ pub struct SchemasCursor {
 }
 
 /// Read a page of schemas, descending by (registered_at_slot, id).
+///
+/// Optional filters compose multiplicatively:
+/// - `attestor_set_filter` narrows to schemas bound to a single
+///   attestor set id (Tier 1.2 of api#48 — powers the
+///   `/attestor-set/{id}` detail page's "Bound schemas" section)
+/// - `before` is the pagination cursor; `None` starts at the head
+///
+/// Same `($N::TYPE IS NULL OR ...)` collapse pattern as `txs_page`:
+/// optional filters are inert when None is bound, no dispatch
+/// explosion, easy to add more filters later (per-name, per-owner
+/// etc).
 pub async fn schemas_page(
     pool: &PgPool,
+    attestor_set_filter: Option<&str>,
     before: Option<SchemasCursor>,
     limit_plus_one: i64,
 ) -> sqlx::Result<Vec<SchemaRow>> {
-    let rows: Vec<SchemaTuple> = match before {
-        Some(c) => {
-            sqlx::query_as(
-                "SELECT s.id, s.name, s.version, s.owner, s.attestor_set_id, s.fee_routing_bps,
-                        s.fee_routing_addr, s.payload_shape_hash,
-                        s.registered_at_slot, s.registered_at_tx, s.registered_at_timestamp,
-                        s.attestation_count,
-                        a.threshold
-                 FROM schemas s
-                 JOIN attestor_sets a ON a.id = s.attestor_set_id
-                 WHERE (s.registered_at_slot, s.id) < ($1, $2)
-                 ORDER BY s.registered_at_slot DESC, s.id DESC
-                 LIMIT $3",
-            )
-            .bind(c.registered_at_slot)
-            .bind(&c.id)
-            .bind(limit_plus_one)
-            .fetch_all(pool)
-            .await?
-        }
-        None => {
-            sqlx::query_as(
-                "SELECT s.id, s.name, s.version, s.owner, s.attestor_set_id, s.fee_routing_bps,
-                        s.fee_routing_addr, s.payload_shape_hash,
-                        s.registered_at_slot, s.registered_at_tx, s.registered_at_timestamp,
-                        s.attestation_count,
-                        a.threshold
-                 FROM schemas s
-                 JOIN attestor_sets a ON a.id = s.attestor_set_id
-                 ORDER BY s.registered_at_slot DESC, s.id DESC
-                 LIMIT $1",
-            )
-            .bind(limit_plus_one)
-            .fetch_all(pool)
-            .await?
-        }
+    let (cursor_slot, cursor_id): (Option<i64>, Option<String>) = match before {
+        Some(c) => (Some(c.registered_at_slot), Some(c.id)),
+        None => (None, None),
     };
+    let rows: Vec<SchemaTuple> = sqlx::query_as(
+        "SELECT s.id, s.name, s.version, s.owner, s.attestor_set_id, s.fee_routing_bps,
+                s.fee_routing_addr, s.payload_shape_hash,
+                s.registered_at_slot, s.registered_at_tx, s.registered_at_timestamp,
+                s.attestation_count,
+                a.threshold
+         FROM schemas s
+         JOIN attestor_sets a ON a.id = s.attestor_set_id
+         WHERE ($1::TEXT   IS NULL OR s.attestor_set_id = $1)
+           AND ($2::BIGINT IS NULL OR (s.registered_at_slot, s.id) < ($2, $3))
+         ORDER BY s.registered_at_slot DESC, s.id DESC
+         LIMIT $4",
+    )
+    .bind(attestor_set_filter)
+    .bind(cursor_slot)
+    .bind(cursor_id)
+    .bind(limit_plus_one)
+    .fetch_all(pool)
+    .await?;
 
     Ok(rows.into_iter().map(schema_row_from_tuple).collect())
 }
