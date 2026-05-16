@@ -13,14 +13,50 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use chrono::SecondsFormat;
 use ligate_api_drip::{RateCheck, SignerError};
 use ligate_api_indexer::NodeClient;
 use serde::{Deserialize, Serialize};
+
+// ---- per-endpoint Cache-Control TTLs --------------------------------------
+//
+// Centralised so the choice for each endpoint is visible at the top of
+// the file and changing one doesn't drift the others.  Picked per the
+// explorer perf brief (api#48) Tier 0:
+//
+//   live-volatile (per-block):   5s   → /v1/info, /v1/blocks (list)
+//   short-volatile (per-tx):     5s   → /v1/txs (list)
+//   modest-rate-of-change:      30s   → /v1/attestations (list), /v1/addresses summary
+//   slow-rate-of-change:        60s   → /v1/schemas (list), /v1/attestor-sets (list)
+//   immutable-once-indexed:    300s   → /v1/blocks/{h}, /v1/txs/{h}, /v1/attestations/{id},
+//                                       /v1/schemas/{id}, /v1/attestor-sets/{id}
+//
+// `300s` for immutable resources because the explorer / partners might
+// pin to a specific block / tx hash; we want both Next.js fetch cache
+// and Vercel's edge to honor a long TTL.  These are content-addressed
+// resources, they truly don't change.
+const TTL_LIVE_SECS: u32 = 5;
+const TTL_MODEST_SECS: u32 = 30;
+const TTL_SLOW_SECS: u32 = 60;
+const TTL_IMMUTABLE_SECS: u32 = 300;
+
+/// Wrap any `IntoResponse` with `Cache-Control: public, max-age=N`.
+/// Centralised so adding `Vary`, `ETag`, `stale-while-revalidate`
+/// later only touches one site.  Use the `TTL_*_SECS` constants
+/// above rather than hand-rolling numbers — keeps the choice
+/// visible at the top of the file.
+fn cached<R: IntoResponse>(resp: R, max_age_secs: u32) -> Response {
+    let mut r = resp.into_response();
+    let value = format!("public, max-age={max_age_secs}");
+    if let Ok(hv) = value.parse() {
+        r.headers_mut().insert(header::CACHE_CONTROL, hv);
+    }
+    r
+}
 
 use crate::cursor;
 use crate::queries;
@@ -364,15 +400,17 @@ pub async fn info(State(state): State<AppState>) -> impl IntoResponse {
         _ => None,
     };
 
-    Json(InfoResponse {
-        chain_id,
-        chain_hash,
-        version,
-        indexer_height,
-        head_height,
-        head_lag_slots,
-    })
-    .into_response()
+    cached(
+        Json(InfoResponse {
+            chain_id,
+            chain_hash,
+            version,
+            indexer_height,
+            head_height,
+            head_lag_slots,
+        }),
+        TTL_LIVE_SECS,
+    )
 }
 
 /// `GET /v1/blocks` — descending list of slots with cursor pagination.
@@ -421,11 +459,13 @@ pub async fn blocks_list(
 
     let data: Vec<BlockResponse> = rows.into_iter().map(slot_to_block_response).collect();
 
-    Json(Page {
-        data,
-        pagination: Pagination { next, limit },
-    })
-    .into_response()
+    cached(
+        Json(Page {
+            data,
+            pagination: Pagination { next, limit },
+        }),
+        TTL_LIVE_SECS,
+    )
 }
 
 /// `GET /v1/blocks/{height}` — a single slot by height.
@@ -457,7 +497,7 @@ pub async fn block_by_height(
         }
     };
 
-    Json(slot_to_block_response(row)).into_response()
+    cached(Json(slot_to_block_response(row)), TTL_IMMUTABLE_SECS)
 }
 
 /// Map a Postgres row from the `slots` table to the RFC 0002
@@ -542,11 +582,13 @@ pub async fn txs_list(
 
     let data: Vec<TxResponse> = rows.into_iter().map(tx_row_to_response).collect();
 
-    Json(Page {
-        data,
-        pagination: Pagination { next, limit },
-    })
-    .into_response()
+    cached(
+        Json(Page {
+            data,
+            pagination: Pagination { next, limit },
+        }),
+        TTL_LIVE_SECS,
+    )
 }
 
 /// `GET /v1/txs/{hash}` — a single tx by hash.
@@ -576,7 +618,7 @@ pub async fn tx_by_hash(
         }
     };
 
-    Json(tx_row_to_response(row)).into_response()
+    cached(Json(tx_row_to_response(row)), TTL_IMMUTABLE_SECS)
 }
 
 /// Map a Postgres row from the `transactions ⨝ slots` join to the
@@ -658,16 +700,18 @@ pub async fn address_summary(
         _ => None,
     };
 
-    Json(AddressSummaryResponse {
-        address: addr,
-        balances,
-        tx_count: (row.txs_sent_count + row.txs_received_count) as u64,
-        first_seen,
-        last_seen,
-        schemas_owned_count: row.schemas_owned_count as u32,
-        attestor_member_count: row.attestor_member_count as u32,
-    })
-    .into_response()
+    cached(
+        Json(AddressSummaryResponse {
+            address: addr,
+            balances,
+            tx_count: (row.txs_sent_count + row.txs_received_count) as u64,
+            first_seen,
+            last_seen,
+            schemas_owned_count: row.schemas_owned_count as u32,
+            attestor_member_count: row.attestor_member_count as u32,
+        }),
+        TTL_MODEST_SECS,
+    )
 }
 
 /// `GET /v1/schemas` — descending list of registered schemas with
@@ -717,11 +761,13 @@ pub async fn schemas_list(
 
     let data: Vec<SchemaResponse> = rows.into_iter().map(schema_row_to_response).collect();
 
-    Json(Page {
-        data,
-        pagination: Pagination { next, limit },
-    })
-    .into_response()
+    cached(
+        Json(Page {
+            data,
+            pagination: Pagination { next, limit },
+        }),
+        TTL_SLOW_SECS,
+    )
 }
 
 /// `GET /v1/schemas/{id}` — a single schema by bech32m `lsc1...` id.
@@ -747,7 +793,7 @@ pub async fn schema_by_id(
         }
     };
 
-    Json(schema_row_to_response(row)).into_response()
+    cached(Json(schema_row_to_response(row)), TTL_IMMUTABLE_SECS)
 }
 
 /// `GET /v1/attestor-sets/{id}` — a single attestor set by bech32m
@@ -788,20 +834,22 @@ pub async fn attestor_set_by_id(
         _ => Vec::new(),
     };
 
-    Json(AttestorSetResponse {
-        id: row.id,
-        members,
-        threshold: row.threshold as u8,
-        registered_at: RegisteredAtResponse {
-            block_height: row.registered_at_slot as u64,
-            tx_hash: row.registered_at_tx,
-            timestamp: row
-                .registered_at_timestamp
-                .to_rfc3339_opts(SecondsFormat::Millis, true),
-        },
-        schema_count: row.schema_count as u32,
-    })
-    .into_response()
+    cached(
+        Json(AttestorSetResponse {
+            id: row.id,
+            members,
+            threshold: row.threshold as u8,
+            registered_at: RegisteredAtResponse {
+                block_height: row.registered_at_slot as u64,
+                tx_hash: row.registered_at_tx,
+                timestamp: row
+                    .registered_at_timestamp
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+            },
+            schema_count: row.schema_count as u32,
+        }),
+        TTL_IMMUTABLE_SECS,
+    )
 }
 
 /// Map a `schemas` row to the RFC 0002 wire shape.
@@ -864,7 +912,10 @@ pub async fn attestations_list(
             return internal_error();
         }
     };
-    Json(attestation_page_response(&mut rows, limit)).into_response()
+    cached(
+        Json(attestation_page_response(&mut rows, limit)),
+        TTL_MODEST_SECS,
+    )
 }
 
 /// `GET /v1/attestations/{id}` where `{id}` is the compound
@@ -887,7 +938,7 @@ pub async fn attestation_by_id(
         }
     };
     match queries::attestation_by_pair(&state.pg, &schema_id, &payload_hash).await {
-        Ok(Some(row)) => Json(attestation_row_to_response(row)).into_response(),
+        Ok(Some(row)) => cached(Json(attestation_row_to_response(row)), TTL_IMMUTABLE_SECS),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -923,7 +974,10 @@ pub async fn attestations_by_schema(
                 return internal_error();
             }
         };
-    Json(attestation_page_response(&mut rows, limit)).into_response()
+    cached(
+        Json(attestation_page_response(&mut rows, limit)),
+        TTL_MODEST_SECS,
+    )
 }
 
 /// `GET /v1/attestor-sets/{id}/attestations` — attestations whose
@@ -947,7 +1001,10 @@ pub async fn attestations_by_attestor_set(
                 return internal_error();
             }
         };
-    Json(attestation_page_response(&mut rows, limit)).into_response()
+    cached(
+        Json(attestation_page_response(&mut rows, limit)),
+        TTL_MODEST_SECS,
+    )
 }
 
 fn decode_attestations_cursor(params: &PaginationParams) -> Option<queries::AttestationsCursor> {
@@ -1059,11 +1116,13 @@ pub async fn attestor_sets_list(
     };
     let data: Vec<AttestorSetResponse> =
         rows.into_iter().map(attestor_set_row_to_response).collect();
-    Json(Page {
-        data,
-        pagination: Pagination { next, limit },
-    })
-    .into_response()
+    cached(
+        Json(Page {
+            data,
+            pagination: Pagination { next, limit },
+        }),
+        TTL_SLOW_SECS,
+    )
 }
 
 fn attestor_set_row_to_response(row: queries::AttestorSetRow) -> AttestorSetResponse {
