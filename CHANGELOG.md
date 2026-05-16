@@ -6,7 +6,61 @@ Format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). I
 
 ## [Unreleased]
 
+## [0.1.0-devnet] - 2026-05-16
+
+First tagged release, cut alongside `ligate-chain` `v0.1.1-devnet`, `ligate-cli` `v0.1.2-devnet`, and `ligate-js` `v0.1.1-devnet` for the `ligate-devnet-1` public devnet launch.
+
+The api hosts both the drip (faucet) endpoints and the indexer query surface that backs [explorer.ligate.io](https://explorer.ligate.io). Deployed to Railway (api + Postgres), proxied through Cloudflare for WAF + rate limit + HSTS + HTTPS enforcement.
+
 ### Added
+
+- **`/v1/info`** — chain identity + indexer head + chain head + lag. Sources `head_height` from a real chain RPC call (parallel `tokio::join!`) rather than aliasing `indexer_height`, so `head_lag_slots` actually means "how far behind the indexer is." (#46)
+- **`/v1/blocks` / `/v1/blocks/{height}`** — slot list + detail. `BlockResponse` carries `height`, `hash`, `parent_hash` (derived from prev slot's hash since chain doesn't emit it), `state_root`, `timestamp`, `tx_count`, `batch_count`, `proposer` (sequencer's Celestia `da_address` from first batch), `size_bytes`, **`finality_status`** ("pending" or "finalized" mirrored from chain), **`finalized_at`** (observed wall-clock when indexer saw pending→finalized). (#44)
+- **`/v1/txs` / `/v1/txs/{hash}`** — tx list + detail. Supports `?kind=` (transfer / register_attestor_set / register_schema / submit_attestation / unknown) and `?block_height=N` filters; both compose with the compound `(slot, position)` cursor pagination. (#43, #50)
+- **`/v1/schemas`, `/v1/attestor-sets`, `/v1/attestations`** — list + detail. (#40 fixed the indexer's attestation event-shape mismatch so these populate at all.) `SchemaResponse` carries `threshold: u8` from the bound attestor set via a JOIN at read time, so the explorer can render "M of N" in the schema list without N+1 fetches per row. (#52)
+- **`/v1/addresses/{addr}`** — balance + tx counts + first/last seen + schemas-owned + attestor-set memberships.
+- **`/v1/addresses/{addr}/txs`** — paginated tx history for one address. Returns txs where the address participated in any role (`sender` for any kind, or `from` / `to` in a transfer's JSONB details). Same envelope + cursor shape as `/v1/txs`; explorer reuses its existing adapter with a different URL. (#52)
+- **`/v1/search?q=...`** — single-endpoint resolver across block height / `lblk1...` block hash / `ltx1...` tx hash / `lig1...` address / `lsc1...` schema / `las1...` attestor set / `lph1...` payload hash / `lsc1...:lph1...` composite attestation id. (#50)
+- **`/v1/stats/totals`** — single object with all chain-level counts (blocks, txs, addresses, schemas, attestor sets, attestations, total LGT supply, treasury balance, treasury address). Treasury fields added in (#42).
+- **`/v1/stats/finality`** — DA finalization p50 / p95 / p99 percentiles. Observed sampling over last 1h of `slots.finalized_at - slots.timestamp`; falls back to hardcoded estimate when sample count < 20. `source` flips from "estimated" to "observed" once enough flips are logged. (#44)
+- **`/v1/stats/next-block-eta`** — live block-cadence prediction. Mean + p95 interval over last 100 slots, `expected_next_at`, `seconds_until_expected` (negative when overdue), `indexer_lag_secs` (true `(chain_head - last_indexed_height) × mean` after #46). (#43, #46)
+- **`/v1/stats/active-addresses`, `/v1/stats/new-wallets-daily`, `/v1/stats/tx-rate-daily`, `/v1/stats/top-holders`** — growth + distribution metrics powering both the explorer key-numbers row and the [investor Grafana dashboard](https://ligate.grafana.net/d/ligate-investor).
+- **`/v1/stats/attestations-daily`** — daily count of attestations submitted, bucketed by UTC day, default 30d window. Same `{date, count}` shape as `/v1/stats/new-wallets-daily`. Powers the explorer's "DAILY ATTESTATIONS" heatmap. (#53)
+- **`/v1/drip`** + **`/v1/drip/status`** — faucet with per-address per-window rate limit, drip budget sanity check on startup, per-address eligibility peek for the explorer faucet UI.
+
+### Storage / schema
+
+- `transactions.protocol_fee_nano` column (migration 0005) — distinct from `fee_paid_nano` (gas). Flat per-call-type module fee routed to treasury / builder share via the schema's `fee_routing_bps`. Devnet-1 values: register_attestor_set = 0.05 LGT, register_schema = 0.10 LGT, submit_attestation = 0.0001 LGT, transfer = 0. (#43)
+- `slots.proposer`, `slots.finality_status`, `slots.finalized_at` columns (migration 0006). Plus `slots.prev_hash` backfill via correlated subquery for historical rows. (#44)
+- `transactions.fee_paid_nano` backfilled to `0` (migration 0007). Future inserts write 0 explicitly rather than NULL — gas pricing on devnet bills 0 (`gas_used = [0, 0]` even though `gas_price = [7, 7]`), so "0 LGT (real)" is more honest than "null (unknown)". (#49)
+
+### Performance
+
+- **`Cache-Control` headers on 11 endpoints** (#49). Per-endpoint TTLs tuned to volatility: 5s for live (`/v1/info`, `/v1/blocks` list, `/v1/txs` list, `/v1/stats/next-block-eta`), 30s for modest (`/v1/attestations` list, address summary, most `/v1/stats/*`), 60s for slow (`/v1/schemas` list, `/v1/attestor-sets` list), **300s for immutable content-addressed resources** (`/v1/blocks/{h}`, `/v1/txs/{h}`, `/v1/attestations/{id}`, `/v1/schemas/{id}`, `/v1/attestor-sets/{id}`). Expected explorer cold-home TTFB drop from ~640ms to ~80ms on warm renders (Vercel edge + Next.js fetch cache both honor downstream).
+
+### Fixed
+
+- `/v1/stats/totals` returns `total_supply_nano` correctly — was hitting `0x<hex>` path; chain only accepts bech32m `token_1...`. (#42)
+- `/v1/attestations` no longer 500s on rows where `submitter_pubkey IS NULL` (post-migration 0004 made it nullable; serialization needed update). (#42)
+- `/v1/txs?kind=` server-side filter — was a no-op (param parsed but never threaded into SQL). Now properly dispatches. (#43)
+- `/v1/stats/next-block-eta.indexer_lag_secs` — was literally `seconds_since_last` renamed, cycling 0 → mean-interval each block. Now reports true `(chain_head - last_indexed_height) × mean_block_interval_secs`. (#46)
+- `/v1/info.head_lag_slots` — was hardcoded 0 because `head_height = indexer_height` aliasing. Now reflects real chain head from parallel `latest_slot()` call. (#46)
+- `/v1/search?q=lsc1...` and `?q=las1...` 500'd because `SELECT 1` returns int4 but sqlx expected int8. Rewrote both as `SELECT EXISTS(...)` returning a clean bool. (#50)
+- `/v1/search?q=lsc1...:lph1...` composite attestation id — previously returned `not_found` (no branch handled it). Added composite-id branch with `attestation_pair_exists` query. (#50)
+- Indexer was silently dropping attestation txs because the chain emits `AttestationModule/AttestorSetRegistered` with PascalCase event names + raw bech32m strings, not the `Attestation/` snake_case shape the parser expected. Fixed event matching to chain reality. (#40)
+- Two queries.rs docstrings claimed module-default fee values (`10/100/0.001 LGT`); corrected to actual devnet-1 genesis overrides (`0.05/0.10/0.0001 LGT`). The `fee_paid_nano` docstring also corrected from "gas_price = 0" to "gas_used = 0" — chain meters but doesn't bill in v0. (#47)
+
+### Followups (tracked, deferred to post-launch or post-mainnet)
+
+- `/v1/schemas?attestor_set_id=X` filter (api#48 Tier 1.2) — devnet has 1 schema, no scale pressure yet
+- `/v1/dashboard` aggregator (api#48 Tier 3.3) — most of the win already captured by Cache-Control
+- WebSocket / SSE on `/v1/blocks/stream` (api#48 Tier 3.4) — post-mainnet
+- Indexer subscribes to chain `BlobExecutionStatus` for true finalization timestamp instead of observed (api#45)
+- Defense-in-depth middleware: tower-governor + body cap + request timeout (api#32)
+- Per-IP rate limit on /v1/drip in api code as defense-in-depth alongside the Cloudflare edge rate limit that already shipped (api#31)
+- Faucet anti-abuse: Discord-account-age check (api#2)
+
+### Added (initial scaffold)
 
 - Initial scaffold. Cargo workspace with four crates:
   - `crates/drip/` — faucet primitives (`Signer`, `RateLimiter`, errors). Ported from the (now-archived) `ligate-io/faucet` repo with no logic changes; just wrapped as a library so the api crate composes it. Carries forward all the wire-format gotchas the faucet repo discovered: no double-wrap on submit, HTTP polling on `/v1/ledger/txs/{hash}` for inclusion confirmation, idempotent `/v1` URL append.
