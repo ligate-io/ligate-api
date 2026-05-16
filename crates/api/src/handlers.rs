@@ -311,32 +311,53 @@ pub async fn info(State(state): State<AppState>) -> impl IntoResponse {
     };
 
     // Chain proxy — same RPC URL the indexer uses. Reusing the
-    // indexer's NodeClient keeps the URL-shaping consistent.
-    let chain_info = match NodeClient::new(&state.config.chain_rpc) {
-        Ok(client) => client.rollup_info().await.ok(),
+    // indexer's NodeClient keeps the URL-shaping consistent. We
+    // need TWO chain calls now (down from one previously) because
+    // `/v1/rollup/info` carries identity but not head height. Parallel
+    // fetch via `tokio::join!` so total latency is max-of-the-two,
+    // not sum.
+    let (chain_info, chain_head) = match NodeClient::new(&state.config.chain_rpc) {
+        Ok(client) => {
+            tokio::join!(
+                async {
+                    match client.rollup_info().await {
+                        Ok(info) => Some(info),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "rollup_info in /v1/info");
+                            None
+                        }
+                    }
+                },
+                async {
+                    match client.latest_slot().await {
+                        Ok(slot) => Some(slot.number),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "latest_slot in /v1/info");
+                            None
+                        }
+                    }
+                }
+            )
+        }
         Err(e) => {
             tracing::warn!(error = %e, "building NodeClient in /v1/info");
-            None
+            (None, None)
         }
     };
 
-    let (chain_id, chain_hash, version, head_height) = match chain_info {
-        Some(info) => (
-            info.chain_id,
-            info.chain_hash,
-            info.version,
-            // The chain's `/v1/rollup/info` doesn't expose head
-            // height directly; the indexer task's bootstrap reads it
-            // via a separate `/v1/ledger/slots/latest` call. To keep
-            // this handler one-roundtrip, surface `head_height` as
-            // `indexer_height` for now — they're equal at the
-            // tail-poll cadence (which is the common case). A
-            // follow-up can split the two via a parallel proxy call
-            // if observable lag becomes a real symptom.
-            indexer_height,
-        ),
-        None => (String::new(), String::new(), String::new(), None),
+    let (chain_id, chain_hash, version) = match chain_info {
+        Some(info) => (info.chain_id, info.chain_hash, info.version),
+        None => (String::new(), String::new(), String::new()),
     };
+
+    // Source `head_height` from the chain (not the indexer). Previously
+    // this aliased `indexer_height` and `head_lag_slots` was therefore
+    // always 0 by construction — explorer's "indexer is behind" badge
+    // could never fire even when it should have. Now reflects ground
+    // truth: a healthy indexer keeps `head_lag_slots <= 1` (one slot
+    // of natural in-flight), and anything north of ~3 slots is a real
+    // operator signal.
+    let head_height = chain_head;
 
     let head_lag_slots = match (head_height, indexer_height) {
         (Some(head), Some(at)) => Some(head.saturating_sub(at)),
