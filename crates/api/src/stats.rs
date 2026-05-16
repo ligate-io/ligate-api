@@ -567,12 +567,18 @@ fn estimated_finality() -> FinalityResponse {
 /// rather than `percentile_disc` because finalization latency is a
 /// continuous quantity — half a slot of interpolation is more
 /// faithful than rounding to the nearest sampled value.
+/// Tuple shape returned by the `compute_observed_finality` SQL.
+/// `Option<f64>` for the three percentiles because `percentile_cont`
+/// returns NULL when the input set is empty (Postgres-side); `i64`
+/// for the count is non-null because COUNT(*) is always defined.
+type FinalityRow = (Option<f64>, Option<f64>, Option<f64>, i64);
+
 async fn compute_observed_finality(pool: &PgPool) -> anyhow::Result<FinalityResponse> {
     // `EXTRACT(EPOCH FROM (a - b))` returns the interval as float
     // seconds, including sub-second precision. The `WHERE` filter
     // keeps the window honest (excluding NULL `finalized_at` rows
     // is implicit in the inequality).
-    let row: Option<(Option<f64>, Option<f64>, Option<f64>, i64)> = sqlx::query_as(
+    let row: Option<FinalityRow> = sqlx::query_as(
         "SELECT
              percentile_cont(0.5)  WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (finalized_at - timestamp))),
              percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (finalized_at - timestamp))),
