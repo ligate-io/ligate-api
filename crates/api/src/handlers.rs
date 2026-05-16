@@ -731,6 +731,76 @@ pub async fn address_summary(
     )
 }
 
+/// `GET /v1/addresses/{addr}/txs` — paginated tx history for one
+/// address. Same envelope shape + cursor as `/v1/txs`.
+///
+/// Tier 1.3 of the explorer perf brief (api#48). Backs the address-
+/// detail page's "Recent transactions" section, which until this
+/// landed was always empty because no endpoint existed to populate
+/// it (the explorer's `getAddress(addr).recent_txs` returned `[]`
+/// unconditionally).
+///
+/// **Filter semantics.** Returns txs where the address participated
+/// in any role:
+/// - As `sender` (covers attestation calls, schema/attestor-set
+///   registrations, transfer-sender)
+/// - As transfer `from` or `to` in the JSONB details
+///
+/// Composes with cursor pagination (compound `(slot, position)`)
+/// just like `/v1/txs`. Encoded base64url of `{slot, idx}` per
+/// RFC 0001.
+pub async fn address_txs(
+    State(state): State<AppState>,
+    Path(addr): Path<String>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let limit = cursor::resolve_limit(params.limit);
+    let before = params
+        .before
+        .as_deref()
+        .and_then(cursor::decode::<TxsCursor>)
+        .map(|c| queries::TxsCursor {
+            slot: c.slot as i64,
+            position: c.idx as i32,
+        });
+
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows = match queries::address_txs_page(&state.pg, &addr, before, limit_plus_one).await {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(error = %e, %addr, "address_txs_page in /v1/addresses/{{addr}}/txs");
+            return internal_error();
+        }
+    };
+
+    let has_more = rows.len() as i64 > limit as i64;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+
+    let next = if has_more {
+        rows.last().and_then(|r| {
+            cursor::encode(&TxsCursor {
+                slot: r.slot as u64,
+                idx: r.position as u32,
+            })
+            .ok()
+        })
+    } else {
+        None
+    };
+
+    let data: Vec<TxResponse> = rows.into_iter().map(tx_row_to_response).collect();
+
+    cached(
+        Json(Page {
+            data,
+            pagination: Pagination { next, limit },
+        }),
+        TTL_LIVE_SECS,
+    )
+}
+
 /// `GET /v1/schemas` — descending list of registered schemas with
 /// compound cursor pagination.
 ///
@@ -877,6 +947,7 @@ fn schema_row_to_response(row: queries::SchemaRow) -> SchemaResponse {
         version: row.version as u32,
         owner: row.owner,
         attestor_set_id: row.attestor_set_id,
+        threshold: row.threshold as u8,
         fee_routing_bps: row.fee_routing_bps as u16,
         fee_routing_addr: row.fee_routing_addr,
         payload_shape_hash: row.payload_shape_hash,

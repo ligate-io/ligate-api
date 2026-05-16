@@ -337,6 +337,82 @@ pub async fn txs_page(
     Ok(rows.into_iter().map(tx_row_from_tuple).collect())
 }
 
+/// Read a page of txs WHERE the given address participated in any
+/// role — as `sender` for any tx kind, or as `from` / `to` in a
+/// transfer's JSONB details. Same wire shape + cursor as
+/// [`txs_page`], so callers can use the same pagination helpers.
+///
+/// Added per explorer perf brief Tier 1.3 (api#48). Backs the address-
+/// detail page's "Recent transactions" section, which until this
+/// landed was always empty because no endpoint existed to populate it.
+///
+/// **SQL semantics.** Three conditions OR'd together:
+/// 1. `t.sender = $1` — covers attestation calls, schema registrations,
+///    attestor-set registrations, and the sender side of transfers
+/// 2. `t.kind = 'transfer' AND t.details->>'from' = $1` — explicit
+///    transfer-sender match (redundant with (1) for transfers but
+///    cheap, and defensive against indexer rev-drift where `sender`
+///    might not always be backfilled correctly for old transfers)
+/// 3. `t.kind = 'transfer' AND t.details->>'to' = $1` — covers
+///    receiving address (not captured by `sender`)
+///
+/// JSONB `->>` returns text, which is what we want for bech32m string
+/// equality. Indexed implicitly by the `transactions_details_gin`
+/// index if it exists; for v0 the address space is small enough that
+/// a sequential scan is acceptable.
+pub async fn address_txs_page(
+    pool: &PgPool,
+    addr: &str,
+    before: Option<TxsCursor>,
+    limit_plus_one: i64,
+) -> sqlx::Result<Vec<TxRow>> {
+    #[allow(clippy::type_complexity)]
+    type TxTuple = (
+        String,
+        i64,
+        i32,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<sqlx::types::BigDecimal>,
+        Option<sqlx::types::BigDecimal>,
+        String,
+        Value,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<DateTime<Utc>>,
+    );
+    let (cursor_slot, cursor_position): (Option<i64>, Option<i32>) = match before {
+        Some(c) => (Some(c.slot), Some(c.position)),
+        None => (None, None),
+    };
+    let rows: Vec<TxTuple> = sqlx::query_as(
+        "SELECT t.hash, t.slot, t.position, t.sender, t.sender_pubkey, t.nonce,
+                t.fee_paid_nano, t.protocol_fee_nano,
+                t.kind, t.details, t.outcome, t.revert_reason,
+                s.hash, s.timestamp
+         FROM transactions t
+         JOIN slots s ON s.height = t.slot
+         WHERE (
+             t.sender = $1
+             OR (t.kind = 'transfer' AND t.details->>'from' = $1)
+             OR (t.kind = 'transfer' AND t.details->>'to'   = $1)
+         )
+         AND ($2::BIGINT IS NULL OR (t.slot, t.position) < ($2, $3))
+         ORDER BY t.slot DESC, t.position DESC
+         LIMIT $4",
+    )
+    .bind(addr)
+    .bind(cursor_slot)
+    .bind(cursor_position)
+    .bind(limit_plus_one)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(tx_row_from_tuple).collect())
+}
+
 // ---- schemas ---------------------------------------------------------------
 //
 // `/v1/schemas` (list) and `/v1/schemas/{id}` (single). All reads
@@ -359,33 +435,49 @@ pub struct SchemaRow {
     pub registered_at_tx: String,
     pub registered_at_timestamp: DateTime<Utc>,
     pub attestation_count: i32,
+    /// Quorum threshold of the bound attestor set, joined in at read
+    /// time. Lets the explorer render "M of N" in the schema list
+    /// without N+1 fetches per row (Tier 3.2 of explorer perf brief
+    /// api#48). `1-64` per the `attestor_sets_threshold_range` CHECK
+    /// constraint, so `u8` on the wire shape is sufficient.
+    pub threshold: i32,
 }
 
 /// Read one schema by id (`lsc1...`). `None` if not yet indexed.
+/// Tuple shape returned by every `schemas + attestor_sets` join in
+/// this module. Defined once so the `sqlx::query_as::<_, …>` generics
+/// stay readable. Field order MUST match the SELECT column order.
+///
+/// The trailing `i32` is `attestor_sets.threshold`, joined in for
+/// the explorer to render "M of N" in the schema list without an
+/// N+1 fetch per row (Tier 3.2 of api#48).
+#[allow(clippy::type_complexity)]
+type SchemaTuple = (
+    String,         // s.id
+    String,         // s.name
+    i32,            // s.version
+    String,         // s.owner
+    String,         // s.attestor_set_id
+    i32,            // s.fee_routing_bps
+    Option<String>, // s.fee_routing_addr
+    String,         // s.payload_shape_hash
+    i64,            // s.registered_at_slot
+    String,         // s.registered_at_tx
+    DateTime<Utc>,  // s.registered_at_timestamp
+    i32,            // s.attestation_count
+    i32,            // a.threshold (JOIN attestor_sets)
+);
+
 pub async fn schema_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<SchemaRow>> {
-    let row = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            i32,
-            String,
-            String,
-            i32,
-            Option<String>,
-            String,
-            i64,
-            String,
-            DateTime<Utc>,
-            i32,
-        ),
-    >(
-        "SELECT id, name, version, owner, attestor_set_id, fee_routing_bps,
-                fee_routing_addr, payload_shape_hash,
-                registered_at_slot, registered_at_tx, registered_at_timestamp,
-                attestation_count
-         FROM schemas
-         WHERE id = $1",
+    let row = sqlx::query_as::<_, SchemaTuple>(
+        "SELECT s.id, s.name, s.version, s.owner, s.attestor_set_id, s.fee_routing_bps,
+                s.fee_routing_addr, s.payload_shape_hash,
+                s.registered_at_slot, s.registered_at_tx, s.registered_at_timestamp,
+                s.attestation_count,
+                a.threshold
+         FROM schemas s
+         JOIN attestor_sets a ON a.id = s.attestor_set_id
+         WHERE s.id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -408,32 +500,18 @@ pub async fn schemas_page(
     before: Option<SchemasCursor>,
     limit_plus_one: i64,
 ) -> sqlx::Result<Vec<SchemaRow>> {
-    let rows = match before {
+    let rows: Vec<SchemaTuple> = match before {
         Some(c) => {
-            sqlx::query_as::<
-                _,
-                (
-                    String,
-                    String,
-                    i32,
-                    String,
-                    String,
-                    i32,
-                    Option<String>,
-                    String,
-                    i64,
-                    String,
-                    DateTime<Utc>,
-                    i32,
-                ),
-            >(
-                "SELECT id, name, version, owner, attestor_set_id, fee_routing_bps,
-                        fee_routing_addr, payload_shape_hash,
-                        registered_at_slot, registered_at_tx, registered_at_timestamp,
-                        attestation_count
-                 FROM schemas
-                 WHERE (registered_at_slot, id) < ($1, $2)
-                 ORDER BY registered_at_slot DESC, id DESC
+            sqlx::query_as(
+                "SELECT s.id, s.name, s.version, s.owner, s.attestor_set_id, s.fee_routing_bps,
+                        s.fee_routing_addr, s.payload_shape_hash,
+                        s.registered_at_slot, s.registered_at_tx, s.registered_at_timestamp,
+                        s.attestation_count,
+                        a.threshold
+                 FROM schemas s
+                 JOIN attestor_sets a ON a.id = s.attestor_set_id
+                 WHERE (s.registered_at_slot, s.id) < ($1, $2)
+                 ORDER BY s.registered_at_slot DESC, s.id DESC
                  LIMIT $3",
             )
             .bind(c.registered_at_slot)
@@ -443,29 +521,15 @@ pub async fn schemas_page(
             .await?
         }
         None => {
-            sqlx::query_as::<
-                _,
-                (
-                    String,
-                    String,
-                    i32,
-                    String,
-                    String,
-                    i32,
-                    Option<String>,
-                    String,
-                    i64,
-                    String,
-                    DateTime<Utc>,
-                    i32,
-                ),
-            >(
-                "SELECT id, name, version, owner, attestor_set_id, fee_routing_bps,
-                        fee_routing_addr, payload_shape_hash,
-                        registered_at_slot, registered_at_tx, registered_at_timestamp,
-                        attestation_count
-                 FROM schemas
-                 ORDER BY registered_at_slot DESC, id DESC
+            sqlx::query_as(
+                "SELECT s.id, s.name, s.version, s.owner, s.attestor_set_id, s.fee_routing_bps,
+                        s.fee_routing_addr, s.payload_shape_hash,
+                        s.registered_at_slot, s.registered_at_tx, s.registered_at_timestamp,
+                        s.attestation_count,
+                        a.threshold
+                 FROM schemas s
+                 JOIN attestor_sets a ON a.id = s.attestor_set_id
+                 ORDER BY s.registered_at_slot DESC, s.id DESC
                  LIMIT $1",
             )
             .bind(limit_plus_one)
@@ -477,23 +541,7 @@ pub async fn schemas_page(
     Ok(rows.into_iter().map(schema_row_from_tuple).collect())
 }
 
-#[allow(clippy::type_complexity)]
-fn schema_row_from_tuple(
-    t: (
-        String,
-        String,
-        i32,
-        String,
-        String,
-        i32,
-        Option<String>,
-        String,
-        i64,
-        String,
-        DateTime<Utc>,
-        i32,
-    ),
-) -> SchemaRow {
+fn schema_row_from_tuple(t: SchemaTuple) -> SchemaRow {
     SchemaRow {
         id: t.0,
         name: t.1,
@@ -507,6 +555,7 @@ fn schema_row_from_tuple(
         registered_at_tx: t.9,
         registered_at_timestamp: t.10,
         attestation_count: t.11,
+        threshold: t.12,
     }
 }
 

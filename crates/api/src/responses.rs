@@ -213,6 +213,11 @@ pub struct SchemaResponse {
     pub owner: String,
     /// Bound attestor set id, bech32m `las1...`.
     pub attestor_set_id: String,
+    /// Quorum threshold of the bound attestor set (`attestor_sets.threshold`),
+    /// joined in at the api layer so the explorer can render "M of N"
+    /// in the schema list without an N+1 fetch per row. Range 1-64
+    /// per the chain's `attestor_sets_threshold_range` CHECK constraint.
+    pub threshold: u8,
     /// Fee-routing share in basis points (0..=10000).
     pub fee_routing_bps: u16,
     /// Destination for the routed share. `null` iff `bps == 0`.
