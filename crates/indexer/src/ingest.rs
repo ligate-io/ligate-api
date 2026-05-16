@@ -33,6 +33,14 @@ const TAIL_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// How long to wait after a transient error before retrying.
 const ERROR_BACKOFF: Duration = Duration::from_secs(5);
 
+/// How often the background re-poll task scans for slots still in
+/// `finality_status = 'pending'` and refetches their chain JSON
+/// looking for the flip to `'finalized'`. Mocha takes ~12-15s to
+/// finalize a slot, so 10s is roughly one-poll-per-finalization on
+/// average — bounded indexer-latency on the observed flip without
+/// hammering the chain.
+const FINALITY_REPOLL_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Run the indexer end-to-end. Bootstraps chain identity, then loops
 /// forever between catching up to the head and tailing.
 pub async fn run(client: NodeClient, pool: PgPool, start_height: Option<u64>) -> ! {
@@ -88,6 +96,19 @@ pub async fn run(client: NodeClient, pool: PgPool, start_height: Option<u64>) ->
         },
     };
 
+    // Spawn the background re-poll task. Runs independently of the
+    // main forward-walk loop, scanning for pending slots and
+    // flipping them when the chain reports finalization. Detached
+    // task — its lifetime is tied to the process. On panic the
+    // tokio runtime would log it; the main loop keeps going.
+    {
+        let client = client.clone();
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            repoll_pending_loop(client, pool).await;
+        });
+    }
+
     // Main loop: catch up to head, then tail.
     loop {
         // What's the head?
@@ -115,7 +136,18 @@ pub async fn run(client: NodeClient, pool: PgPool, start_height: Option<u64>) ->
             let h = next_height;
             match client.slot_at(h).await {
                 Ok(Some(slot)) => {
-                    if let Err(e) = db::upsert_slot(&pool, &slot).await {
+                    // Fetch the proposer (sequencer's Celestia
+                    // `da_address`) from the slot's first batch.
+                    // Tolerates failure: a missing proposer just
+                    // leaves the column NULL; the slot still lands.
+                    // ingest_slot_transactions below will re-fetch
+                    // batches for tx processing; we accept the
+                    // duplicate fetch for ~6s/slot rate so the
+                    // slot upsert path stays simple. If this
+                    // becomes a hot path, refactor to share the
+                    // batch object between the two consumers.
+                    let proposer = extract_slot_proposer(&client, &slot).await;
+                    if let Err(e) = db::upsert_slot(&pool, &slot, proposer.as_deref()).await {
                         error!(error = %e, height = h, "writing slot; will retry");
                         tokio::time::sleep(ERROR_BACKOFF).await;
                         // Don't advance `next_height`; outer loop
@@ -413,4 +445,128 @@ async fn update_address_summaries(
     }
 
     Ok(())
+}
+
+/// Pull the slot's sequencer identity out of its first batch's
+/// receipt. Currently the chain doesn't expose a rollup-native
+/// proposer/sequencer ID on the slot itself (tracked at
+/// ligate-chain#82 for leader rotation), but every batch carries
+/// `receipt.da_address` — the Celestia wallet that submitted the
+/// blob to DA. That address IS the sequencer's identity for our
+/// purposes; on devnet-1 it's a single wallet, on multi-sequencer
+/// chains it would rotate.
+///
+/// Returns `None` and logs (debug-level only — this is best-effort)
+/// for slots without batches, batches that 404, or batches whose
+/// receipt doesn't carry da_address. The slot upsert still proceeds
+/// with `proposer = NULL` in those cases.
+///
+/// **Cost.** One extra HTTP per slot at backfill time. The same
+/// batch is re-fetched later by `ingest_slot_transactions` for tx
+/// processing. Acceptable at devnet-1 rate (~1 slot per 6 seconds);
+/// if we ever need to optimize, refactor to share the LedgerBatch
+/// between both consumers.
+async fn extract_slot_proposer(client: &NodeClient, slot: &SlotResponse) -> Option<String> {
+    let batch_range = slot.batch_range.as_ref()?;
+    let first_batch_number = batch_range.start;
+    let batch = match client.batch_at(first_batch_number).await {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            debug!(
+                slot = slot.number,
+                batch = first_batch_number,
+                "first batch 404 during proposer extract; proposer stays NULL"
+            );
+            return None;
+        }
+        Err(e) => {
+            debug!(
+                slot = slot.number,
+                batch = first_batch_number,
+                error = %e,
+                "first batch fetch failed during proposer extract; proposer stays NULL"
+            );
+            return None;
+        }
+    };
+    // LedgerBatch's typed shape ends at `tx_range`; everything below
+    // is in the `raw` catch-all map. `receipt.da_address` is the
+    // path we care about. Multi-level Value drill-down with as_str()
+    // at the leaf — returns None on any missing layer or wrong type.
+    let da_address = batch
+        .raw
+        .get("receipt")?
+        .as_object()?
+        .get("da_address")?
+        .as_str()?
+        .to_string();
+    Some(da_address)
+}
+
+/// Background task: scan for `finality_status = 'pending'` slots,
+/// re-fetch their chain JSON, and flip to `'finalized'` (stamping
+/// `finalized_at = NOW()`) when the chain reports the transition.
+///
+/// Runs forever on a fixed interval (`FINALITY_REPOLL_INTERVAL`).
+/// Tolerates transient errors by logging and continuing — the next
+/// tick will retry. Doesn't share state with the main forward-walk
+/// loop; the only shared resource is the Postgres pool.
+///
+/// **Why a separate task.** The forward-walk loop only revisits a
+/// slot once (during ingest). Pending slots need re-visits at a
+/// cadence decoupled from new-slot arrival rate. Putting this on
+/// the main loop would either (a) starve re-polls when ingest is
+/// fast or (b) starve ingest when many slots are pending.
+async fn repoll_pending_loop(client: NodeClient, pool: PgPool) -> ! {
+    loop {
+        tokio::time::sleep(FINALITY_REPOLL_INTERVAL).await;
+
+        let pending = match db::pending_slot_heights(&pool).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "scanning pending slots; will retry");
+                continue;
+            }
+        };
+        if pending.is_empty() {
+            continue;
+        }
+
+        // Re-fetch each pending slot's chain JSON. Collect (height,
+        // current_finality_status) pairs for a batched DB update.
+        // Owned `String`s because we move them into a `&[(u64,
+        // Option<&str>)]` for `flip_pending_slots`; converting to
+        // borrowed at call time keeps the helper's signature
+        // borrowing-friendly without forcing two passes.
+        let mut observed: Vec<(u64, Option<String>)> = Vec::with_capacity(pending.len());
+        for height in &pending {
+            match client.slot_at(*height).await {
+                Ok(Some(slot)) => {
+                    observed.push((*height, slot.finality_status.clone()));
+                }
+                Ok(None) => {
+                    debug!(height = *height, "pending slot now 404; skipping flip");
+                }
+                Err(e) => {
+                    debug!(
+                        height = *height,
+                        error = %e,
+                        "re-fetching pending slot; will retry next tick"
+                    );
+                }
+            }
+        }
+
+        let view: Vec<(u64, Option<&str>)> =
+            observed.iter().map(|(h, s)| (*h, s.as_deref())).collect();
+        match db::flip_pending_slots(&pool, &view).await {
+            Ok(0) => {} // No flips this tick — normal, most pending stays pending.
+            Ok(n) => {
+                info!(flipped = n, "pending → finalized");
+            }
+            Err(e) => {
+                warn!(error = %e, "flipping pending slots; will retry next tick");
+            }
+        }
+    }
 }

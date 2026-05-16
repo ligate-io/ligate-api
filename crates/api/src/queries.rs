@@ -27,6 +27,23 @@ pub struct SlotRow {
     pub timestamp: DateTime<Utc>,
     pub batch_count: i32,
     pub tx_count: i32,
+    /// Block producer identity. For v0 this is the Celestia
+    /// `da_address` of the sequencer that submitted the slot's
+    /// first batch to DA (see indexer's `extract_slot_proposer`).
+    /// `None` on legacy rows pre-migration-0006 that haven't been
+    /// re-ingested, and on slots whose first-batch fetch failed.
+    pub proposer: Option<String>,
+    /// DA finality state: `Some("pending")`, `Some("finalized")`,
+    /// or `None` (legacy rows; chain rev that didn't emit the
+    /// field). Frontend treats `None` as "unknown" — render no
+    /// badge.
+    pub finality_status: Option<String>,
+    /// Wall-clock instant the indexer observed the
+    /// pending → finalized transition. `None` for currently-pending
+    /// slots and for legacy rows where the transition happened
+    /// before we tracked it. See indexer's `repoll_pending_loop`
+    /// for how this is populated.
+    pub finalized_at: Option<DateTime<Utc>>,
 }
 
 /// Read the highest slot height the indexer has written. `None` for
@@ -42,36 +59,61 @@ pub async fn max_slot_height(pool: &PgPool) -> sqlx::Result<Option<i64>> {
 /// yet (indexer hasn't caught up to that height, or the height is
 /// above the chain's head).
 pub async fn slot_by_height(pool: &PgPool, height: i64) -> sqlx::Result<Option<SlotRow>> {
-    let row = sqlx::query_as::<
-        _,
-        (
-            i64,
-            String,
-            Option<String>,
-            Option<String>,
-            DateTime<Utc>,
-            i32,
-            i32,
-        ),
-    >(
-        "SELECT height, hash, prev_hash, state_root, timestamp, batch_count, tx_count
+    let row = sqlx::query_as::<_, SlotTuple>(
+        "SELECT height, hash, prev_hash, state_root, timestamp,
+                batch_count, tx_count, proposer, finality_status, finalized_at
          FROM slots WHERE height = $1",
     )
     .bind(height)
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(
-        |(height, hash, prev_hash, state_root, timestamp, batch_count, tx_count)| SlotRow {
-            height,
-            hash,
-            prev_hash,
-            state_root,
-            timestamp,
-            batch_count,
-            tx_count,
-        },
-    ))
+    Ok(row.map(slot_row_from_tuple))
+}
+
+/// Tuple shape returned by every `SELECT … FROM slots` in this
+/// module. Defined once so the inline `sqlx::query_as::<_, …>`
+/// generics stay readable as columns grow. Field order MUST match
+/// the column order in the SELECT statements.
+#[allow(clippy::type_complexity)]
+type SlotTuple = (
+    i64,                   // height
+    String,                // hash
+    Option<String>,        // prev_hash
+    Option<String>,        // state_root
+    DateTime<Utc>,         // timestamp
+    i32,                   // batch_count
+    i32,                   // tx_count
+    Option<String>,        // proposer
+    Option<String>,        // finality_status
+    Option<DateTime<Utc>>, // finalized_at
+);
+
+fn slot_row_from_tuple(t: SlotTuple) -> SlotRow {
+    let (
+        height,
+        hash,
+        prev_hash,
+        state_root,
+        timestamp,
+        batch_count,
+        tx_count,
+        proposer,
+        finality_status,
+        finalized_at,
+    ) = t;
+    SlotRow {
+        height,
+        hash,
+        prev_hash,
+        state_root,
+        timestamp,
+        batch_count,
+        tx_count,
+        proposer,
+        finality_status,
+        finalized_at,
+    }
 }
 
 /// Read a page of slots, descending by height. `before_height` is the
@@ -91,21 +133,11 @@ pub async fn slots_page(
     // pseudo-NULL because Postgres treats `height < NULL` as
     // unknown (not true), which silently filters out every row.
     // Splitting keeps the planner honest and the SQL readable.
-    let rows = match before_height {
+    let rows: Vec<SlotTuple> = match before_height {
         Some(h) => {
-            sqlx::query_as::<
-                _,
-                (
-                    i64,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                    DateTime<Utc>,
-                    i32,
-                    i32,
-                ),
-            >(
-                "SELECT height, hash, prev_hash, state_root, timestamp, batch_count, tx_count
+            sqlx::query_as(
+                "SELECT height, hash, prev_hash, state_root, timestamp,
+                        batch_count, tx_count, proposer, finality_status, finalized_at
                  FROM slots
                  WHERE height < $1
                  ORDER BY height DESC
@@ -117,19 +149,9 @@ pub async fn slots_page(
             .await?
         }
         None => {
-            sqlx::query_as::<
-                _,
-                (
-                    i64,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                    DateTime<Utc>,
-                    i32,
-                    i32,
-                ),
-            >(
-                "SELECT height, hash, prev_hash, state_root, timestamp, batch_count, tx_count
+            sqlx::query_as(
+                "SELECT height, hash, prev_hash, state_root, timestamp,
+                        batch_count, tx_count, proposer, finality_status, finalized_at
                  FROM slots
                  ORDER BY height DESC
                  LIMIT $1",
@@ -140,20 +162,7 @@ pub async fn slots_page(
         }
     };
 
-    Ok(rows
-        .into_iter()
-        .map(
-            |(height, hash, prev_hash, state_root, timestamp, batch_count, tx_count)| SlotRow {
-                height,
-                hash,
-                prev_hash,
-                state_root,
-                timestamp,
-                batch_count,
-                tx_count,
-            },
-        )
-        .collect())
+    Ok(rows.into_iter().map(slot_row_from_tuple).collect())
 }
 
 // ---- transactions ----------------------------------------------------------

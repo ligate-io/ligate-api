@@ -463,26 +463,36 @@ async fn compute_tx_rate_daily(pool: &PgPool, days: u32) -> anyhow::Result<TxRat
 /// DA finalization-latency stats for the explorer + investor
 /// dashboards.
 ///
-/// **v0 returns estimated values, not observations.** The api doesn't
-/// yet subscribe to the chain's `BlobExecutionStatus` broadcast
-/// channel; the chain's `ligate_da_finalization_latency_seconds`
-/// Prometheus histogram has the real data but isn't reachable from
-/// the api's network. So this endpoint hardcodes Mocha-derived
-/// estimates (~12s p50, ~15s p95/p99) so the explorer has a real
-/// field to render and the response *shape* is forward-compatible
-/// for when we wire actual sampling.
+/// **Now backed by observations.** Starting with migration 0006,
+/// the indexer stamps `slots.finalized_at` (wall-clock NOW) when
+/// it observes the chain's per-slot `finality_status` field
+/// transition `pending → finalized`. This endpoint reads those
+/// observations directly: `finalized_at - timestamp` is the
+/// observed finalization latency per slot. We aggregate over the
+/// last 1h.
 ///
-/// When sampling lands (tracked in `ligate-api#TBD`), the wire shape
-/// stays identical; only the `source` field flips from `"estimated"`
-/// to `"observed"`. Clients can branch on `source` if they want to
-/// surface that distinction in the UI ("typical" vs "live").
+/// **Observation lag.** The indexer's re-poll loop runs every
+/// `FINALITY_REPOLL_INTERVAL` (10s), so observed values can be up
+/// to 10s above the true chain finalization moment. Acceptable
+/// v0 fidelity; a tighter measurement would require subscribing
+/// to the chain's `BlobExecutionStatus` broadcast channel, which
+/// isn't reachable from the api's network in current deploy
+/// topology. Tracked as a followup.
+///
+/// **Fallback.** When the indexer hasn't yet observed any
+/// transitions (fresh deploy, head < migration-0006 + few
+/// pending slots), this endpoint falls back to the previous
+/// hardcoded Mocha-derived estimates (~12s p50, ~15s p95/p99)
+/// and sets `source: "estimated"` so clients can render an
+/// appropriate label.
 #[derive(Serialize)]
 struct FinalityResponse {
-    /// Window the percentiles are computed over. `"static"` for the
-    /// estimated v0; `"1h"` / `"24h"` etc. when sampling is wired.
+    /// Window the percentiles are computed over. `"static"` when
+    /// `source == "estimated"`; `"1h"` when `source == "observed"`.
     window: String,
-    /// Number of finalization observations in the window. `0` while
-    /// `source == "estimated"`.
+    /// Number of finalization observations in the window. `0`
+    /// while `source == "estimated"`. Clients should treat
+    /// `sampled_count < ~20` with reduced confidence.
     sampled_count: u32,
     /// Median DA finalization latency in seconds.
     p50_seconds: f64,
@@ -493,33 +503,37 @@ struct FinalityResponse {
     /// DA layer the rollup is anchored to. Constant per chain.
     da_layer: String,
     /// `"estimated"` when values come from a static config-derived
-    /// model; `"observed"` when from real-time chain observations.
-    /// Clients should not assume `"observed"` is more accurate (the
-    /// estimate is empirically within 10% of observed on Mocha) but
-    /// MAY display the source for transparency.
+    /// model (insufficient samples in the window); `"observed"`
+    /// when from real-time indexer observations. Clients SHOULD
+    /// display this distinction.
     source: String,
     /// RFC3339 UTC instant the values were computed.
     as_of: String,
 }
+
+/// Below this sample count we don't trust the observed
+/// percentiles and fall back to the static estimate. Set high
+/// enough that a quiet hour (few finalizations) doesn't render
+/// noisy outliers as "real" stats, but low enough that the
+/// observed mode kicks in within an hour of normal operation
+/// (Mocha produces ~600 slots/hour → 600 observations once
+/// backfill catches up).
+const FINALITY_MIN_SAMPLES: i64 = 20;
 
 pub async fn finality(State(state): State<AppState>) -> Response {
     let key = "finality";
     if let Some(cached) = state.stats_cache.get_fresh(key, DEFAULT_TTL) {
         return cached_json_response(cached);
     }
-    // Estimated values for Mocha. p50 = ~one Mocha block (~12s); p95
-    // and p99 trend to the next-block deadline (~15s, matches the
-    // operator dashboard's `ligate_da_finalization_latency_seconds`
-    // histogram during the devnet-1 smoke test).
-    let payload = FinalityResponse {
-        window: "static".to_string(),
-        sampled_count: 0,
-        p50_seconds: 12.0,
-        p95_seconds: 15.0,
-        p99_seconds: 15.0,
-        da_layer: "celestia-mocha".to_string(),
-        source: "estimated".to_string(),
-        as_of: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    let payload = match compute_observed_finality(&state.pg).await {
+        Ok(p) => p,
+        Err(e) => {
+            // Treat DB errors as fall-through to the estimate.
+            // Better to keep the endpoint serving stable data than
+            // 500 the explorer when sampling has a transient hiccup.
+            tracing::warn!(error = %e, "finality observed sampling; falling back to estimate");
+            estimated_finality()
+        }
     };
     match serde_json::to_string(&payload) {
         Ok(body) => {
@@ -528,6 +542,74 @@ pub async fn finality(State(state): State<AppState>) -> Response {
         }
         Err(e) => error_response(e.into()),
     }
+}
+
+/// Fallback values used when observed sampling has too few rows
+/// to be trustworthy. Same numbers we shipped pre-migration-0006.
+fn estimated_finality() -> FinalityResponse {
+    FinalityResponse {
+        window: "static".to_string(),
+        sampled_count: 0,
+        p50_seconds: 12.0,
+        p95_seconds: 15.0,
+        p99_seconds: 15.0,
+        da_layer: "celestia-mocha".to_string(),
+        source: "estimated".to_string(),
+        as_of: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    }
+}
+
+/// Run the percentile query against `slots.finalized_at -
+/// slots.timestamp` for the last 1h. Returns the estimated
+/// fallback if `sampled_count < FINALITY_MIN_SAMPLES`.
+///
+/// **SQL note.** We use `percentile_cont` (continuous interpolation)
+/// rather than `percentile_disc` because finalization latency is a
+/// continuous quantity — half a slot of interpolation is more
+/// faithful than rounding to the nearest sampled value.
+async fn compute_observed_finality(pool: &PgPool) -> anyhow::Result<FinalityResponse> {
+    // `EXTRACT(EPOCH FROM (a - b))` returns the interval as float
+    // seconds, including sub-second precision. The `WHERE` filter
+    // keeps the window honest (excluding NULL `finalized_at` rows
+    // is implicit in the inequality).
+    let row: Option<(Option<f64>, Option<f64>, Option<f64>, i64)> = sqlx::query_as(
+        "SELECT
+             percentile_cont(0.5)  WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (finalized_at - timestamp))),
+             percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (finalized_at - timestamp))),
+             percentile_cont(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (finalized_at - timestamp))),
+             COUNT(*)
+         FROM slots
+         WHERE finalized_at IS NOT NULL
+           AND finalized_at > NOW() - INTERVAL '1 hour'",
+    )
+    .fetch_optional(pool)
+    .await
+    .context("running finality percentile query")?;
+
+    let Some((p50, p95, p99, count)) = row else {
+        return Ok(estimated_finality());
+    };
+    if count < FINALITY_MIN_SAMPLES {
+        return Ok(estimated_finality());
+    }
+    // Once `count >= FINALITY_MIN_SAMPLES`, the percentile_cont
+    // outputs should be Some. Guard with `unwrap_or` as defensive
+    // programming — preferred fallback is the estimate, not 0.0
+    // which would be misleading.
+    let p50 = p50.unwrap_or(12.0);
+    let p95 = p95.unwrap_or(15.0);
+    let p99 = p99.unwrap_or(15.0);
+
+    Ok(FinalityResponse {
+        window: "1h".to_string(),
+        sampled_count: count as u32,
+        p50_seconds: p50,
+        p95_seconds: p95,
+        p99_seconds: p99,
+        da_layer: "celestia-mocha".to_string(),
+        source: "observed".to_string(),
+        as_of: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    })
 }
 
 // ---- /next-block-eta -------------------------------------------------------

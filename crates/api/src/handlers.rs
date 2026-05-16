@@ -452,10 +452,13 @@ fn slot_to_block_response(row: queries::SlotRow) -> BlockResponse {
         timestamp: row.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
         tx_count: row.tx_count,
         batch_count: row.batch_count,
-        // Reserved — chain doesn't emit these in v0. See
-        // BlockResponse field docs for rationale.
-        proposer: None,
+        proposer: row.proposer,
+        // Reserved — chain doesn't emit size_bytes in v0.
         size_bytes: None,
+        finality_status: row.finality_status,
+        finalized_at: row
+            .finalized_at
+            .map(|t| t.to_rfc3339_opts(SecondsFormat::Millis, true)),
     }
 }
 

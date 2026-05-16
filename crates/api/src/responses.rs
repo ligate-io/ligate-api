@@ -83,13 +83,45 @@ pub struct BlockResponse {
     /// Number of batches the chain emitted for this slot (mock-DA
     /// can emit > 1; production typically 1).
     pub batch_count: i32,
-    /// Address that produced the block. `null` for v0 — the chain
-    /// doesn't currently expose this in the slot JSON; reserved for
-    /// when leader rotation lands (ligate-chain#82).
+    /// Address that produced the block. The chain doesn't expose
+    /// a rollup-native sequencer identity on the slot itself
+    /// (tracked at ligate-chain#82 for proper leader rotation),
+    /// but every batch carries `receipt.da_address` — the
+    /// sequencer's Celestia wallet that submitted the blob to DA.
+    /// The indexer extracts this from the slot's first batch and
+    /// surfaces it here. Format: bech32 Celestia address
+    /// (`celestia1…`).
+    ///
+    /// `null` for legacy rows pre-migration-0006 (before the
+    /// indexer extracted this) and for slots whose first batch
+    /// fetch failed. On devnet-1 (single sequencer) all rows
+    /// otherwise carry the same value; on a multi-sequencer chain
+    /// this rotates per slot.
     pub proposer: Option<String>,
-    /// Block size in bytes. `null` for v0 — same reason as
-    /// `proposer`; reserved for when the chain emits it.
+    /// Block size in bytes. `null` for v0 — chain doesn't emit it
+    /// yet; reserved for when it does.
     pub size_bytes: Option<u64>,
+    /// DA finality state of the slot, mirrored from the chain's
+    /// per-slot `finality_status` field. Values:
+    ///   - `"pending"`   — blob submitted to Celestia, awaiting
+    ///                     confirmation (~12-15s on Mocha).
+    ///   - `"finalized"` — confirmation depth reached; permanent.
+    /// `null` on legacy rows pre-migration-0006. Frontend renders
+    /// a per-block badge keyed off this value (`"pending"` →
+    /// amber spinner, `"finalized"` → sage check, `null` →
+    /// no badge).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finality_status: Option<String>,
+    /// RFC3339 millisecond-precision UTC timestamp the indexer
+    /// observed the slot transition from `"pending"` to
+    /// `"finalized"`. `null` for currently-pending slots and for
+    /// legacy rows where the transition happened before we
+    /// tracked it. The wall-clock difference between this and
+    /// `timestamp` is the per-slot finalization latency (typically
+    /// 12-15s on Mocha); aggregated to percentiles at
+    /// `/v1/stats/finality`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalized_at: Option<String>,
 }
 
 /// One transaction, served at `GET /v1/txs/{hash}` and as each
