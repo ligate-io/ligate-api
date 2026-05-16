@@ -48,6 +48,22 @@ use crate::AppState;
 /// don't multiply Postgres / chain-RPC load.
 const DEFAULT_TTL: Duration = Duration::from_secs(30);
 
+/// Default downstream Cache-Control TTL for stats endpoints whose
+/// data changes on a slow rolling window (active addresses, daily
+/// timeseries, top-holders, finality percentiles). Matches the
+/// in-process `DEFAULT_TTL` so cache invalidation aligns.
+const TTL_STATS_DEFAULT_SECS: u32 = 30;
+
+/// `/v1/stats/totals` — counts move every block but the explorer
+/// re-renders often; 10s is the sweet spot between "data freshness"
+/// and "actually cacheable downstream."
+const TTL_STATS_TOTALS_SECS: u32 = 10;
+
+/// `/v1/stats/next-block-eta` — by definition changes every second.
+/// 5s downstream TTL matches the in-process cache TTL set in the
+/// handler; documented in the explorer perf brief (api#48).
+const TTL_STATS_NEXT_BLOCK_ETA_SECS: u32 = 5;
+
 /// In-process cache of serialized stats responses, keyed by a stable
 /// per-endpoint string (including query-param fingerprint). Stores
 /// the serialized JSON body verbatim so a cache hit is a `String`
@@ -80,14 +96,21 @@ impl StatsCache {
 }
 
 /// Wrap a serialized JSON body in a `Cache-Control`-tagged 200
-/// response. Centralised so adding headers (eg. `Vary`, `ETag`)
-/// later only touches one site.
-fn cached_json_response(body: String) -> Response {
+/// response with a per-endpoint `max_age_secs`. Centralised so
+/// adding headers (eg. `Vary`, `ETag`) later only touches one site.
+///
+/// Per-endpoint TTLs are chosen to match the endpoint's actual
+/// volatility — `/v1/info` changes per-block (5s), historical
+/// percentiles change slowly (30s), block-history doesn't change
+/// at all (300s+). Next.js + Vercel CDN honor these automatically
+/// downstream.
+fn cached_json_response(body: String, max_age_secs: u32) -> Response {
+    let cache_control = format!("public, max-age={max_age_secs}");
     (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "application/json"),
-            (header::CACHE_CONTROL, "public, max-age=30"),
+            (header::CACHE_CONTROL, cache_control.as_str()),
         ],
         body,
     )
@@ -155,13 +178,13 @@ struct TotalsResponse {
 pub async fn totals(State(state): State<AppState>) -> Response {
     let key = "totals";
     if let Some(cached) = state.stats_cache.get_fresh(key, DEFAULT_TTL) {
-        return cached_json_response(cached);
+        return cached_json_response(cached, TTL_STATS_TOTALS_SECS);
     }
     match compute_totals(&state).await {
         Ok(payload) => match serde_json::to_string(&payload) {
             Ok(body) => {
                 state.stats_cache.put(key.to_string(), body.clone());
-                cached_json_response(body)
+                cached_json_response(body, TTL_STATS_TOTALS_SECS)
             }
             Err(e) => error_response(e.into()),
         },
@@ -278,13 +301,13 @@ pub async fn active_addresses(
     };
     let key = format!("active-addresses:{window}");
     if let Some(cached) = state.stats_cache.get_fresh(&key, DEFAULT_TTL) {
-        return cached_json_response(cached);
+        return cached_json_response(cached, TTL_STATS_DEFAULT_SECS);
     }
     match compute_active_addresses(&state.pg, &window, interval).await {
         Ok(payload) => match serde_json::to_string(&payload) {
             Ok(body) => {
                 state.stats_cache.put(key, body.clone());
-                cached_json_response(body)
+                cached_json_response(body, TTL_STATS_DEFAULT_SECS)
             }
             Err(e) => error_response(e.into()),
         },
@@ -342,13 +365,13 @@ pub async fn new_wallets_daily(
     let days = params.days.unwrap_or(7).min(90);
     let key = format!("new-wallets-daily:{days}");
     if let Some(cached) = state.stats_cache.get_fresh(&key, DEFAULT_TTL) {
-        return cached_json_response(cached);
+        return cached_json_response(cached, TTL_STATS_DEFAULT_SECS);
     }
     match compute_new_wallets_daily(&state.pg, days).await {
         Ok(payload) => match serde_json::to_string(&payload) {
             Ok(body) => {
                 state.stats_cache.put(key, body.clone());
-                cached_json_response(body)
+                cached_json_response(body, TTL_STATS_DEFAULT_SECS)
             }
             Err(e) => error_response(e.into()),
         },
@@ -412,13 +435,13 @@ pub async fn tx_rate_daily(
     let days = params.days.unwrap_or(7).min(90);
     let key = format!("tx-rate-daily:{days}");
     if let Some(cached) = state.stats_cache.get_fresh(&key, DEFAULT_TTL) {
-        return cached_json_response(cached);
+        return cached_json_response(cached, TTL_STATS_DEFAULT_SECS);
     }
     match compute_tx_rate_daily(&state.pg, days).await {
         Ok(payload) => match serde_json::to_string(&payload) {
             Ok(body) => {
                 state.stats_cache.put(key, body.clone());
-                cached_json_response(body)
+                cached_json_response(body, TTL_STATS_DEFAULT_SECS)
             }
             Err(e) => error_response(e.into()),
         },
@@ -523,7 +546,7 @@ const FINALITY_MIN_SAMPLES: i64 = 20;
 pub async fn finality(State(state): State<AppState>) -> Response {
     let key = "finality";
     if let Some(cached) = state.stats_cache.get_fresh(key, DEFAULT_TTL) {
-        return cached_json_response(cached);
+        return cached_json_response(cached, TTL_STATS_DEFAULT_SECS);
     }
     let payload = match compute_observed_finality(&state.pg).await {
         Ok(p) => p,
@@ -538,7 +561,7 @@ pub async fn finality(State(state): State<AppState>) -> Response {
     match serde_json::to_string(&payload) {
         Ok(body) => {
             state.stats_cache.put(key.to_string(), body.clone());
-            cached_json_response(body)
+            cached_json_response(body, TTL_STATS_DEFAULT_SECS)
         }
         Err(e) => error_response(e.into()),
     }
@@ -678,7 +701,7 @@ pub async fn next_block_eta(State(state): State<AppState>) -> Response {
     // every second the chain is alive.
     let ttl = Duration::from_secs(5);
     if let Some(cached) = state.stats_cache.get_fresh(key, ttl) {
-        return cached_json_response(cached);
+        return cached_json_response(cached, TTL_STATS_NEXT_BLOCK_ETA_SECS);
     }
     // Fetch the chain's head height in parallel with the slot-history
     // query inside `compute_next_block_eta` so `indexer_lag_secs`
@@ -697,7 +720,7 @@ pub async fn next_block_eta(State(state): State<AppState>) -> Response {
         Ok(payload) => match serde_json::to_string(&payload) {
             Ok(body) => {
                 state.stats_cache.put(key.to_string(), body.clone());
-                cached_json_response(body)
+                cached_json_response(body, TTL_STATS_NEXT_BLOCK_ETA_SECS)
             }
             Err(e) => error_response(e.into()),
         },
@@ -842,13 +865,13 @@ pub async fn top_holders(
     let n = params.n.unwrap_or(10).min(100);
     let key = format!("top-holders:{n}");
     if let Some(cached) = state.stats_cache.get_fresh(&key, DEFAULT_TTL) {
-        return cached_json_response(cached);
+        return cached_json_response(cached, TTL_STATS_DEFAULT_SECS);
     }
     match compute_top_holders(&state, n).await {
         Ok(payload) => match serde_json::to_string(&payload) {
             Ok(body) => {
                 state.stats_cache.put(key, body.clone());
-                cached_json_response(body)
+                cached_json_response(body, TTL_STATS_DEFAULT_SECS)
             }
             Err(e) => error_response(e.into()),
         },

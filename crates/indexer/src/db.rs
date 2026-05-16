@@ -356,6 +356,20 @@ pub async fn insert_transaction(
         IndexerTx::Unknown { .. } => None,
     };
 
+    // Gas fee paid: on devnet the chain meters but doesn't bill
+    // (`gas_used = [0, 0]` on every batch receipt observed, even
+    // though `gas_price` is non-zero at `[7, 7]`). So the actual
+    // billed gas fee per tx is 0 — write that explicitly instead of
+    // NULL so the explorer can distinguish "0 LGT (real)" from
+    // "unknown (not yet exposed)". On testnet+ when gas pricing
+    // actually charges, the indexer should extract from the receipt;
+    // tracked as a follow-up in ligate-api#48 Tier 3.1.
+    //
+    // For Unknown tx kinds we still write 0 — gas billing is per-
+    // batch, not per-kind, so the kind-discrimination here is moot
+    // unless / until the chain exposes per-tx gas_used.
+    let fee_paid_nano: i64 = 0;
+
     sqlx::query(
         "INSERT INTO transactions (
             hash, slot, position, sender, sender_pubkey, nonce,
@@ -363,13 +377,14 @@ pub async fn insert_transaction(
             kind, details, raw, outcome, revert_reason
          ) VALUES (
             $1, $2, $3, $4, NULL, NULL,
-            NULL, $5,
-            $6, $7, $8, $9, NULL
+            $5, $6,
+            $7, $8, $9, $10, NULL
          )
          ON CONFLICT (hash) DO UPDATE SET
             slot              = EXCLUDED.slot,
             position          = EXCLUDED.position,
             sender            = EXCLUDED.sender,
+            fee_paid_nano     = EXCLUDED.fee_paid_nano,
             protocol_fee_nano = EXCLUDED.protocol_fee_nano,
             kind              = EXCLUDED.kind,
             details           = EXCLUDED.details,
@@ -381,6 +396,7 @@ pub async fn insert_transaction(
     .bind(slot_height as i64)
     .bind(position_in_block)
     .bind(sender)
+    .bind(fee_paid_nano)
     .bind(protocol_fee_nano)
     .bind(kind)
     .bind(details)
