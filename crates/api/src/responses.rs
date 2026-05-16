@@ -103,9 +103,11 @@ pub struct BlockResponse {
     pub size_bytes: Option<u64>,
     /// DA finality state of the slot, mirrored from the chain's
     /// per-slot `finality_status` field. Values:
-    ///   - `"pending"`   — blob submitted to Celestia, awaiting
-    ///                     confirmation (~12-15s on Mocha).
-    ///   - `"finalized"` — confirmation depth reached; permanent.
+    ///
+    /// - `"pending"` — blob submitted to Celestia, awaiting
+    ///   confirmation (~12-15s on Mocha).
+    /// - `"finalized"` — confirmation depth reached; permanent.
+    ///
     /// `null` on legacy rows pre-migration-0006. Frontend renders
     /// a per-block badge keyed off this value (`"pending"` →
     /// amber spinner, `"finalized"` → sage check, `null` →

@@ -199,10 +199,12 @@ pub struct SlotResponse {
     #[serde(default)]
     pub batch_range: Option<Uint64Range>,
     /// DA finality state of the slot. Chain emits one of:
-    ///   - `"pending"`   — blob submitted to Celestia, awaiting
-    ///                     N-block confirmation (~12-15s on Mocha).
-    ///   - `"finalized"` — confirmation depth reached; data is
-    ///                     considered permanent.
+    ///
+    /// - `"pending"` — blob submitted to Celestia, awaiting N-block
+    ///   confirmation (~12-15s on Mocha).
+    /// - `"finalized"` — confirmation depth reached; data is
+    ///   considered permanent.
+    ///
     /// `None` on older chain revs that didn't surface this field.
     /// The indexer mirrors this value onto `slots.finality_status`
     /// and observes the `pending → finalized` transition wall-clock
