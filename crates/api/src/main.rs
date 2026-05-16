@@ -227,6 +227,7 @@ async fn main() -> Result<()> {
         .route("/v1/txs", get(handlers::txs_list))
         .route("/v1/txs/{hash}", get(handlers::tx_by_hash))
         .route("/v1/addresses/{addr}", get(handlers::address_summary))
+        .route("/v1/addresses/{addr}/txs", get(handlers::address_txs))
         .route("/v1/schemas", get(handlers::schemas_list))
         .route("/v1/schemas/{id}", get(handlers::schema_by_id))
         .route("/v1/attestor-sets", get(handlers::attestor_sets_list))
