@@ -406,6 +406,82 @@ async fn compute_new_wallets_daily(
     Ok(NewWalletsDailyResponse { days, points })
 }
 
+// ---- /attestations-daily ---------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct AttestationsDailyQuery {
+    /// How many days of history to return. Default 30 (matches the
+    /// explorer's GitHub-style heatmap grid), capped at 90.
+    #[serde(default)]
+    days: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct AttestationsDailyResponse {
+    days: u32,
+    points: Vec<DailyPoint>,
+}
+
+/// `GET /v1/stats/attestations-daily?days=N` — daily count of
+/// attestations submitted, bucketed by UTC day, for the trailing
+/// N days. Powers the explorer's "DAILY ATTESTATIONS" heatmap
+/// (default 30-day window) so it doesn't have to filter the broader
+/// `/v1/stats/tx-rate-daily` response client-side.
+///
+/// Same `DailyPoint` shape as `/v1/stats/new-wallets-daily` so
+/// callers can reuse rendering helpers across both endpoints.
+pub async fn attestations_daily(
+    State(state): State<AppState>,
+    Query(params): Query<AttestationsDailyQuery>,
+) -> Response {
+    let days = params.days.unwrap_or(30).min(90);
+    let key = format!("attestations-daily:{days}");
+    if let Some(cached) = state.stats_cache.get_fresh(&key, DEFAULT_TTL) {
+        return cached_json_response(cached, TTL_STATS_DEFAULT_SECS);
+    }
+    match compute_attestations_daily(&state.pg, days).await {
+        Ok(payload) => match serde_json::to_string(&payload) {
+            Ok(body) => {
+                state.stats_cache.put(key, body.clone());
+                cached_json_response(body, TTL_STATS_DEFAULT_SECS)
+            }
+            Err(e) => error_response(e.into()),
+        },
+        Err(e) => error_response(e),
+    }
+}
+
+async fn compute_attestations_daily(
+    pool: &PgPool,
+    days: u32,
+) -> anyhow::Result<AttestationsDailyResponse> {
+    let since = Utc::now() - chrono::Duration::days(days as i64);
+    // Same bucket-by-UTC-day shape as `compute_new_wallets_daily`,
+    // just against the `attestations` table's `submitted_at_timestamp`.
+    // Days with zero attestations are absent from the rows (Postgres
+    // `GROUP BY` doesn't emit empty groups); the explorer fills the
+    // 30-cell grid with 0s for missing dates.
+    let rows: Vec<(DateTime<Utc>, i64)> = sqlx::query_as(
+        "SELECT DATE_TRUNC('day', submitted_at_timestamp) AS day, COUNT(*) AS attestations \
+         FROM attestations \
+         WHERE submitted_at_timestamp >= $1 \
+         GROUP BY day \
+         ORDER BY day ASC",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await
+    .context("daily attestations bucket")?;
+    let points = rows
+        .into_iter()
+        .map(|(day, count)| DailyPoint {
+            date: day.format("%Y-%m-%d").to_string(),
+            count,
+        })
+        .collect();
+    Ok(AttestationsDailyResponse { days, points })
+}
+
 // ---- /tx-rate-daily --------------------------------------------------------
 
 #[derive(Deserialize)]
