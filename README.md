@@ -48,10 +48,10 @@ GET  /v1/attestor-sets/{id}/attestations     → attestations for one attestor s
 
 # Attestations
 GET  /v1/attestations                        → paginated list of latest attestations
-GET  /v1/attestations/{id}                   → attestation detail (composite id)
+GET  /v1/attestations/{id}                   → attestation detail (bech32m `lat1...`)
 
 # Search
-GET  /v1/search                              → unified lookup (lig1, ltx1, lsc1, las1, block height)
+GET  /v1/search                              → unified lookup (lig1, ltx1, lsc1, las1, lat1, lph1, block height)
 
 # Stats (in-process 30s cache; powers explorer + investor dashboard)
 GET  /v1/stats/totals                        → cumulative totals across the chain
@@ -211,7 +211,7 @@ The test is skipped (not failed) when `DATABASE_URL` is unset, so plain `cargo t
 
 ## Versioning
 
-Tags use clean semver going forward (`vX.Y.Z`, no `-devnet` suffix). The current tag `v0.1.0-devnet` and the matching workspace version predate the convention adopted in `ligate-chain` v0.1.2 (chain#374, 2026-05-17); the next release here drops the suffix. Network identity stays in `chain_id` and genesis dir names, not in the binary tag.
+Tags use clean semver going forward (`vX.Y.Z`, no `-devnet` suffix). The convention was adopted in `ligate-chain` v0.1.2 (chain#374, 2026-05-17); the api jumped from `v0.1.0-devnet` to `v0.2.1` alongside the chain v0.2.0 wire-format change (chain#381 / api#56 — AttestationId collapsed to a single `lat1...` bech32m hash). Network identity stays in `chain_id` and genesis dir names, not in the binary tag.
 
 ## Related repos
 

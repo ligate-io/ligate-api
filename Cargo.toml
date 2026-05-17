@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-devnet"
+version = "0.2.1"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 authors = ["Ligate Labs <hello@ligate.io>"]
@@ -19,9 +19,9 @@ rust-version = "1.93"
 
 [workspace.dependencies]
 # Internal — keep paths so each crate compiles standalone for tests.
-ligate-api-drip    = { path = "crates/drip", version = "0.1.0-devnet" }
-ligate-api-indexer = { path = "crates/indexer", version = "0.1.0-devnet" }
-ligate-api-types   = { path = "crates/types", version = "0.1.0-devnet" }
+ligate-api-drip    = { path = "crates/drip", version = "0.2.1" }
+ligate-api-indexer = { path = "crates/indexer", version = "0.2.1" }
+ligate-api-types   = { path = "crates/types", version = "0.2.1" }
 
 # HTTP server. axum 0.8 to match what chain crates pull in (avoids a
 # duplicate axum in the dep tree) and to use the `{name}` path-param
@@ -78,6 +78,17 @@ clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
 url = "2"
 base64 = "0.22"
+
+# Hashing + bech32m. Used by the indexer to derive AttestationId
+# (`lat1...`) from the `(schema_id, payload_hash)` pair via
+# `SHA-256(schema_id_bytes || payload_hash_bytes)`, mirroring the
+# chain reference at
+# `ligate-chain/crates/modules/attestation/src/lib.rs::AttestationId::from_pair`.
+# Versions match the chain workspace (chain pins sha2 = "=0.11.0";
+# bech32 is a transitive on the chain side via sov-modules-api, but
+# we depend on it directly so the indexer derivation is self-contained).
+sha2   = "0.11"
+bech32 = "0.11"
 
 # Chain crates (git deps; pin via branch=main until chain ships a stable rev).
 ligate-client = { git = "https://github.com/ligate-io/ligate-chain.git", branch = "main", features = ["submit"] }

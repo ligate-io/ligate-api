@@ -1036,38 +1036,37 @@ pub async fn attestations_list(
     )
 }
 
-/// `GET /v1/attestations/{id}` where `{id}` is the compound
-/// `<schemaId>:<payloadHash>` (both bech32m, colon-separated).
+/// `GET /v1/attestations/{id}` where `{id}` is the canonical
+/// `lat1...` AttestationId (bech32m, single segment) introduced in
+/// chain v0.2.0. The constituent `schema_id` + `payload_hash` are
+/// returned in the response body for callers that need them; the id
+/// alone is opaque (SHA-256 of the pair) and not invertible.
 pub async fn attestation_by_id(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let (schema_id, payload_hash) = match id.split_once(':') {
-        Some((s, p)) if !s.is_empty() && !p.is_empty() => (s.to_string(), p.to_string()),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error":
-                        "attestation id must be '<schemaId>:<payloadHash>' (lsc1...:lph1...)",
-                })),
-            )
-                .into_response();
-        }
-    };
-    match queries::attestation_by_pair(&state.pg, &schema_id, &payload_hash).await {
+    let lowered = id.to_lowercase();
+    if !lowered.starts_with("lat1") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "attestation id must be a bech32m `lat1...` string",
+            })),
+        )
+            .into_response();
+    }
+    match queries::attestation_by_id(&state.pg, &lowered).await {
         Ok(Some(row)) => cached(Json(attestation_row_to_response(row)), TTL_IMMUTABLE_SECS),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": "attestation not found",
-                "schema_id": schema_id,
-                "payload_hash": payload_hash,
+                "id": lowered,
             })),
         )
             .into_response(),
         Err(e) => {
-            tracing::error!(error = %e, %schema_id, %payload_hash, "attestation_by_pair");
+            tracing::error!(error = %e, id = %lowered, "attestation_by_id");
             internal_error()
         }
     }
@@ -1169,7 +1168,7 @@ fn attestation_page_response(
 
 fn attestation_row_to_response(row: queries::AttestationRow) -> AttestationResponse {
     AttestationResponse {
-        id: format!("{}:{}", row.schema_id, row.payload_hash),
+        id: row.id,
         schema_id: row.schema_id,
         payload_hash: row.payload_hash,
         submitter: row.submitter,
@@ -1290,9 +1289,11 @@ pub struct SearchParams {
 /// - `lig1...`    → address (resolved against `address_summaries.address`)
 /// - `lsc1...`    → schema (resolved against `schemas.id`)
 /// - `las1...`    → attestor set (resolved against `attestor_sets.id`)
-/// - `lph1...`    → first attestation whose `payload_hash` matches
-///   (returned as the `(schema_id, payload_hash)` pair
-///   the explorer needs to deep-link)
+/// - `lat1...`    → attestation (resolved against `attestations.id`,
+///   the v0.2.0 canonical SHA-256 of the `(schema_id, payload_hash)`
+///   pair)
+/// - `lph1...`    → first attestation whose `payload_hash` matches,
+///   returned as the `lat1...` id the explorer needs to deep-link
 ///
 /// Anything else, or a prefix that doesn't resolve to an indexed row,
 /// returns `{ "kind": "not_found", "query": "<echoed>" }` with HTTP
@@ -1328,29 +1329,6 @@ pub async fn search(
     }
     // Prefix dispatch. Each branch only does one DB round-trip.
     let lowered = q.to_lowercase();
-
-    // Composite-id form `lsc1…:lph1…` (attestation id) checked FIRST
-    // so a query that contains a `:` doesn't get swallowed by the
-    // `lsc1` prefix branch below. Validates both halves before the
-    // DB hit so a malformed input returns `not_found` (200), not 500.
-    if let Some((schema_id, payload_hash)) = lowered.split_once(':') {
-        if schema_id.starts_with("lsc1") && payload_hash.starts_with("lph1") {
-            match queries::attestation_pair_exists(&state.pg, schema_id, payload_hash).await {
-                Ok(true) => {
-                    return Json(SearchResponse::Attestation {
-                        schema_id: schema_id.to_string(),
-                        payload_hash: payload_hash.to_string(),
-                    })
-                    .into_response();
-                }
-                Ok(false) => {} // fall through to not_found
-                Err(e) => {
-                    tracing::error!(error = %e, %lowered, "search attestation_pair_exists");
-                    return internal_error();
-                }
-            }
-        }
-    }
 
     if lowered.starts_with("lblk1") {
         match queries::slot_height_for_block_hash(&state.pg, &lowered).await {
@@ -1413,18 +1391,25 @@ pub async fn search(
                 return internal_error();
             }
         }
+    } else if lowered.starts_with("lat1") {
+        match queries::attestation_id_exists(&state.pg, &lowered).await {
+            Ok(true) => {
+                return Json(SearchResponse::Attestation { id: lowered }).into_response();
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(error = %e, %lowered, "search attestation_id_exists");
+                return internal_error();
+            }
+        }
     } else if lowered.starts_with("lph1") {
-        match queries::attestation_by_payload_hash(&state.pg, &lowered).await {
-            Ok(Some((schema_id, payload_hash))) => {
-                return Json(SearchResponse::Attestation {
-                    schema_id,
-                    payload_hash,
-                })
-                .into_response();
+        match queries::attestation_id_by_payload_hash(&state.pg, &lowered).await {
+            Ok(Some(id)) => {
+                return Json(SearchResponse::Attestation { id }).into_response();
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::error!(error = %e, %lowered, "search attestation_by_payload_hash");
+                tracing::error!(error = %e, %lowered, "search attestation_id_by_payload_hash");
                 return internal_error();
             }
         }

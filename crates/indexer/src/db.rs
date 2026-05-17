@@ -510,6 +510,12 @@ pub async fn insert_schema(
 /// (chain doesn't carry it in the event payload; migration 0004
 /// loosened the NOT NULL).
 ///
+/// `d.id` is the v0.2.0 canonical `lat1...` AttestationId, derived
+/// at parse time by [`crate::attestation_id::compute_attestation_id`].
+/// ON CONFLICT targets the `attestations_id_unique` index (migration
+/// `20260517000001_attestation_id_lat.sql`) so re-submissions of the
+/// same logical attestation update the existing row in place.
+///
 /// FKs: `schema_id` → `schemas(id)`, `submitted_at_tx` →
 /// `transactions(hash)`.
 pub async fn insert_attestation(
@@ -521,14 +527,15 @@ pub async fn insert_attestation(
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO attestations (
-            schema_id, payload_hash, submitter, submitter_pubkey,
+            id, schema_id, payload_hash, submitter, submitter_pubkey,
             submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
             signature_count
-         ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7)
-         ON CONFLICT (schema_id, payload_hash, submitted_at_tx) DO UPDATE SET
+         ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8)
+         ON CONFLICT (id) DO UPDATE SET
             signature_count = EXCLUDED.signature_count,
             indexed_at      = NOW()",
     )
+    .bind(&d.id)
     .bind(&d.schema_id)
     .bind(&d.payload_hash)
     .bind(&d.submitter)

@@ -24,6 +24,7 @@
 // a published-doc requirement. Skipping missing-docs lint for v0;
 // tighten once the public surface is pinned by `ligate-api`'s needs.
 
+pub mod attestation_id;
 mod client;
 mod db;
 mod error;
