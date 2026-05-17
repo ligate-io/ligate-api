@@ -15,22 +15,64 @@ Two deploy artifacts (one Rust binary, one Postgres) instead of three repos and 
 
 ## Endpoints (v0)
 
+All endpoints are wired and serving on `ligate-devnet-1`. Grouped by surface:
+
 ```
-GET  /v1/health               → 200 {"status":"ok"}
-GET  /v1/info                 → chain_id, chain_hash, version, latest_block, tx_per_second
-POST /v1/drip                 → body {address}, returns {tx_hash, amount_nano}
-GET  /v1/drip/status          → drip_amount, rate_limit_secs, addresses_dripped, faucet_address
-GET  /v1/blocks               → paginated list of latest blocks
-GET  /v1/blocks/{height}      → block detail
-GET  /v1/txs                  → paginated list of latest txs
-GET  /v1/txs/{hash}           → tx detail
-GET  /v1/addresses/{addr}     → balance + recent tx history
-GET  /v1/schemas              → list of registered schemas
-GET  /v1/schemas/{id}         → schema detail
-GET  /v1/attestor-sets/{id}   → attestor-set detail
+# Health / info
+GET  /health                                 → 200 {"status":"ok"} (unversioned; orchestrator probe)
+GET  /v1/health                              → 200 {"status":"ok"}
+GET  /v1/info                                → chain_id, chain_hash, version,
+                                                indexer_height, head_height, head_lag_slots
+
+# Blocks
+GET  /v1/blocks                              → paginated list of latest blocks
+GET  /v1/blocks/{height}                     → block detail
+
+# Transactions
+GET  /v1/txs                                 → paginated list of latest txs (?block_height, ?kind)
+GET  /v1/txs/{hash}                          → tx detail
+
+# Addresses
+GET  /v1/addresses/{addr}                    → balance + recent tx history
+GET  /v1/addresses/{addr}/txs                → paginated tx history for one address
+
+# Schemas
+GET  /v1/schemas                             → list of registered schemas (?attestor_set_id)
+GET  /v1/schemas/{id}                        → schema detail (incl. threshold join)
+GET  /v1/schemas/{id}/attestations           → attestations for one schema
+
+# Attestor sets
+GET  /v1/attestor-sets                       → list of registered attestor sets
+GET  /v1/attestor-sets/{id}                  → attestor-set detail
+GET  /v1/attestor-sets/{id}/attestations     → attestations for one attestor set
+
+# Attestations
+GET  /v1/attestations                        → paginated list of latest attestations
+GET  /v1/attestations/{id}                   → attestation detail (composite id)
+
+# Search
+GET  /v1/search                              → unified lookup (lig1, ltx1, lsc1, las1, block height)
+
+# Stats (in-process 30s cache; powers explorer + investor dashboard)
+GET  /v1/stats/totals                        → cumulative totals across the chain
+GET  /v1/stats/finality                      → finality lag + last-finalized slot
+GET  /v1/stats/next-block-eta                → predicted next-block-at (uses true indexer lag)
+GET  /v1/stats/active-addresses              → active-addresses windows
+GET  /v1/stats/new-wallets-daily             → daily new-wallet counts
+GET  /v1/stats/tx-rate-daily                 → daily tx-rate timeseries
+GET  /v1/stats/attestations-daily            → daily attestations (powers 30d heatmap)
+GET  /v1/stats/top-holders                   → top LGT holders
+
+# Faucet / drip
+POST /v1/drip                                → body {address}, returns
+                                                {address, tx_hash, amount_nano, drip_amount_lgt}
+GET  /v1/drip/status                         → drip_amount_nano, drip_amount_lgt,
+                                                rate_limit_secs, addresses_dripped, faucet_address
+GET  /v1/drip/status?address={addr}          → {can_drip, next_drip_at} (per-address shape;
+                                                untagged enum, same path)
 ```
 
-In v0, `/v1/drip*` are the only fully-wired endpoints. The indexer query handlers return `501 Not Implemented` with a tracking-issue link — they get fleshed out in subsequent PRs as the indexer's Postgres schema stabilises.
+Per `crates/api/src/main.rs:217-258`. Pagination shapes, cache headers, and error envelope are documented in `docs/rfcs/` and `docs/queries.md`.
 
 ## Architecture
 
@@ -77,9 +119,9 @@ cargo run --bin ligate-node
 cd ~/Desktop/ligate-api
 DATABASE_URL=postgres://postgres:local@localhost:5432/ligate_api \
 CHAIN_RPC=http://localhost:12346 \
-CHAIN_ID=4321 \
+CHAIN_ID=4242 \
 CHAIN_HASH=$(curl -s http://localhost:12346/v1/rollup/info | jq -r .chain_hash) \
-LGT_TOKEN_ID=$(jq -r .gas_token_config.token_id ~/Desktop/ligate-chain/devnet/genesis/bank.json | sed 's/^token_/...convert.../') \
+LGT_TOKEN_ID=token_1nyl0e0yweragfsatygt24zmd8jrr2vqtvdfptzjhxkguz2xxx3vs0y07u7 \
 DRIP_SIGNER_KEY=0101010101010101010101010101010101010101010101010101010101010101 \
 DRIP_MIN_BUDGET=0 \
 cargo run --bin ligate-api
@@ -88,6 +130,8 @@ cargo run --bin ligate-api
 curl http://localhost:8080/v1/health
 curl http://localhost:8080/v1/drip/status
 ```
+
+`CHAIN_ID=4242` is the numeric chain id used by `ligate-devnet-1` and the localnet genesis we ship in `ligate-chain/devnet/`. The Sovereign SDK demo default is `4321`; do not use it, your txs won't include in the local chain. `LGT_TOKEN_ID` is the canonical `$LGT` token id minted by `devnet/genesis/bank.json`; it's a stable constant, no derivation step needed.
 
 The dev key (`0x01...01`) is the chain's localnet dev keypair — pre-funded with 10000 LGT in `devnet/genesis/bank.json`. Don't use it on devnet/testnet/mainnet.
 
@@ -163,7 +207,11 @@ The test is skipped (not failed) when `DATABASE_URL` is unset, so plain `cargo t
 
 ## Status
 
-**Devnet.** Day-1 surface is `/v1/drip*` only; indexer query endpoints get fleshed out across subsequent PRs as the Postgres schema solidifies. `ligate-devnet-1` is live.
+**Devnet.** `ligate-devnet-1` is live and the full v0 surface above is wired and serving. Faucet (`/v1/drip*`), explorer-facing indexer queries (`/v1/blocks*`, `/v1/txs*`, `/v1/addresses/*`, `/v1/schemas*`, `/v1/attestor-sets*`, `/v1/attestations*`, `/v1/search`), and analytics stats (`/v1/stats/*`) all hit Postgres. Pagination shapes, cache headers, and per-address drip status landed across PRs #44 to #55.
+
+## Versioning
+
+Tags use clean semver going forward (`vX.Y.Z`, no `-devnet` suffix). The current tag `v0.1.0-devnet` and the matching workspace version predate the convention adopted in `ligate-chain` v0.1.2 (chain#374, 2026-05-17); the next release here drops the suffix. Network identity stays in `chain_id` and genesis dir names, not in the binary tag.
 
 ## Related repos
 
