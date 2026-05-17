@@ -6,6 +6,38 @@ Format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). I
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-17
+
+Cut alongside `ligate-chain` v0.2.0, `ligate-cli` v0.2.0, `ligate-js` v0.2.0, and `ligate-explorer` for the cross-repo AttestationId wire-format change. Version jumps from `0.1.0-devnet` to `0.2.1` to align with the chain's clean-semver convention (chain#374) and reflect that this is the next breaking-compatible release on the api side.
+
+### Changed (BREAKING — wire format)
+
+- **`AttestationId` collapsed to `lat1...`** (chain#381 / api#56). The compound `<schema_id>:<payload_hash>` (`lsc1...:lph1...`) form is replaced by a single 32-byte bech32m hash with the `lat` HRP, derived as `SHA-256(schema_id_bytes ‖ payload_hash_bytes)`. Mirrors the chain reference at `ligate-chain/crates/modules/attestation/src/lib.rs::AttestationId::from_pair` and is snapshot-tested in `crates/indexer/src/attestation_id.rs` against the chain's `borsh_snapshot.rs` vector.
+- **`GET /v1/attestations/{id}`** now accepts a single bech32m `lat1...` path segment instead of the colon-separated compound form. Returns 400 on any other prefix.
+- **`AttestationResponse.id`** is now the `lat1...` form. Constituent `schema_id` + `payload_hash` remain as separate fields on the response body for callers that need them.
+- **`/v1/search`** drops the composite-id branch (`lsc1...:lph1...`) and adds a `lat1...` branch. The `lph1...` payload-hash branch now returns the canonical `lat1...` id of the first matching attestation instead of the `(schema_id, payload_hash)` pair.
+- **`SearchResponse::Attestation`** payload shape: `{ "kind": "attestation", "id": "lat1..." }` (was `{ "kind": "attestation", "schema_id": "lsc1...", "payload_hash": "lph1..." }`). Clients that need the constituents fetch `/v1/attestations/{id}` for the full body.
+
+### Storage / schema
+
+- New `attestations.id TEXT NOT NULL` column with `UNIQUE INDEX attestations_id_unique` (migration `20260517000001_attestation_id_lat.sql`). The indexer writes the `lat1...` form derived at parse time; UPSERTs target `ON CONFLICT (id)` so re-submissions of the same logical attestation fold into the existing row instead of inserting duplicates. Migration TRUNCATEs the table on the assumption that the operator ran a devnet re-genesis before applying (no in-SQL backfill path exists; SHA-256 + bech32m aren't available as Postgres functions). The indexer re-populates from chain history on the next ingest pass.
+
+### Added
+
+- `crates/indexer/src/attestation_id.rs`: `compute_attestation_id(schema_id, payload_hash) -> Result<String, AttestationIdError>` helper. Pure function, snapshot-tested against the chain's reference vector (`schema_id = [0x11; 32], payload_hash = [0x33; 32]` SHA-256s to `b0dcb09af5496e779e60b21109a718475091191efc7a8638b01d51c622fc9128`).
+- `bech32 = "0.11"` + `sha2 = "0.11"` workspace deps (versions match `ligate-chain`'s workspace).
+- `IndexerSubmitAttestation.id` (parser-side), `AttestationRow.id` (query-side), and the corresponding column in every `SELECT FROM attestations` statement.
+
+### Removed
+
+- `queries::attestation_by_pair(schema_id, payload_hash)` (use `attestation_by_id(lat1...)`).
+- `queries::attestation_pair_exists(schema_id, payload_hash)` (use `attestation_id_exists(lat1...)`).
+- `queries::attestation_by_payload_hash` return shape changed to `Option<String>` (the `lat1...` id) instead of `Option<(String, String)>`; the helper was renamed to `attestation_id_by_payload_hash` to reflect that.
+
+### Migration / coordination
+
+This release moves in lockstep with chain v0.2.0. Operators applying the new migration on a populated devnet DB will lose all `attestations` rows (TRUNCATE); the operator runbook for devnet re-genesis is the source of truth for sequencing. The chain crates pinned in `Cargo.toml` (`attestation`, `ligate-client`, `ligate-stf`, `ligate-rollup`) remain on `branch = "main"`; once chain v0.2.0 merges to `main` the api picks it up on next build.
+
 ## [0.1.0-devnet] - 2026-05-16
 
 First tagged release, cut alongside `ligate-chain` `v0.1.1-devnet`, `ligate-cli` `v0.1.2-devnet`, and `ligate-js` `v0.1.1-devnet` for the `ligate-devnet-1` public devnet launch.

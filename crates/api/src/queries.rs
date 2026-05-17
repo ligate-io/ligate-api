@@ -726,14 +726,16 @@ fn tx_row_from_tuple(
 
 /// One row of `attestations` plus the FK-joined registration provenance.
 ///
-/// The chain identifies an attestation by `(schema_id, payload_hash)`;
-/// our wire representation collapses that into a compound id
-/// `"<schema_id>:<payload_hash>"` for path routing (`/v1/attestations/{id}`).
-/// The handler does the split/join; this row carries the constituent
-/// fields verbatim so the wire layer can compose either form without
-/// re-parsing.
+/// `id` is the v0.2.0 canonical `lat1...` AttestationId, derived by
+/// the indexer at ingest via SHA-256(schema_id_bytes || payload_hash_bytes)
+/// and persisted alongside its constituent `schema_id` + `payload_hash`
+/// fields. Path routing (`/v1/attestations/{id}`) uses `id`; the
+/// constituents are retained in the wire shape so partners that need
+/// them don't have to fetch the schema or chain separately.
 #[derive(Debug)]
 pub struct AttestationRow {
+    /// Bech32m `lat1...` AttestationId.
+    pub id: String,
     pub schema_id: String,
     /// Bech32m `lph1...` payload hash.
     pub payload_hash: String,
@@ -775,6 +777,7 @@ pub async fn attestations_page(
         String,
         String,
         String,
+        String,
         Option<String>,
         i64,
         String,
@@ -783,7 +786,7 @@ pub async fn attestations_page(
     )> = match (schema_id_filter, before) {
         (Some(s), Some(c)) => {
             sqlx::query_as(
-                "SELECT schema_id, payload_hash, submitter, submitter_pubkey,
+                "SELECT id, schema_id, payload_hash, submitter, submitter_pubkey,
                         submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
                         signature_count
                  FROM attestations
@@ -802,7 +805,7 @@ pub async fn attestations_page(
         }
         (Some(s), None) => {
             sqlx::query_as(
-                "SELECT schema_id, payload_hash, submitter, submitter_pubkey,
+                "SELECT id, schema_id, payload_hash, submitter, submitter_pubkey,
                         submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
                         signature_count
                  FROM attestations
@@ -817,7 +820,7 @@ pub async fn attestations_page(
         }
         (None, Some(c)) => {
             sqlx::query_as(
-                "SELECT schema_id, payload_hash, submitter, submitter_pubkey,
+                "SELECT id, schema_id, payload_hash, submitter, submitter_pubkey,
                         submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
                         signature_count
                  FROM attestations
@@ -834,7 +837,7 @@ pub async fn attestations_page(
         }
         (None, None) => {
             sqlx::query_as(
-                "SELECT schema_id, payload_hash, submitter, submitter_pubkey,
+                "SELECT id, schema_id, payload_hash, submitter, submitter_pubkey,
                         submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
                         signature_count
                  FROM attestations
@@ -866,6 +869,7 @@ pub async fn attestations_by_attestor_set(
         String,
         String,
         String,
+        String,
         Option<String>,
         i64,
         String,
@@ -874,7 +878,7 @@ pub async fn attestations_by_attestor_set(
     )> = match before {
         Some(c) => {
             sqlx::query_as(
-                "SELECT a.schema_id, a.payload_hash, a.submitter, a.submitter_pubkey,
+                "SELECT a.id, a.schema_id, a.payload_hash, a.submitter, a.submitter_pubkey,
                         a.submitted_at_slot, a.submitted_at_tx, a.submitted_at_timestamp,
                         a.signature_count
                  FROM attestations a
@@ -894,7 +898,7 @@ pub async fn attestations_by_attestor_set(
         }
         None => {
             sqlx::query_as(
-                "SELECT a.schema_id, a.payload_hash, a.submitter, a.submitter_pubkey,
+                "SELECT a.id, a.schema_id, a.payload_hash, a.submitter, a.submitter_pubkey,
                         a.submitted_at_slot, a.submitted_at_tx, a.submitted_at_timestamp,
                         a.signature_count
                  FROM attestations a
@@ -912,15 +916,15 @@ pub async fn attestations_by_attestor_set(
     Ok(rows.into_iter().map(attestation_row_from_tuple).collect())
 }
 
-/// Read one attestation by `(schema_id, payload_hash)`. `None` if
-/// not yet indexed.
-pub async fn attestation_by_pair(
-    pool: &PgPool,
-    schema_id: &str,
-    payload_hash: &str,
-) -> sqlx::Result<Option<AttestationRow>> {
+/// Read one attestation by its canonical `lat1...` AttestationId.
+/// `None` if not yet indexed. v0.2.0 replaced the prior
+/// `attestation_by_pair(schema_id, payload_hash)` lookup; the id is
+/// the SHA-256 of the pair so callers that still hold the pair can
+/// recover the id via the indexer's `compute_attestation_id` helper.
+pub async fn attestation_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<AttestationRow>> {
     #[allow(clippy::type_complexity)]
     let row: Option<(
+        String,
         String,
         String,
         String,
@@ -930,14 +934,13 @@ pub async fn attestation_by_pair(
         DateTime<Utc>,
         i32,
     )> = sqlx::query_as(
-        "SELECT schema_id, payload_hash, submitter, submitter_pubkey,
+        "SELECT id, schema_id, payload_hash, submitter, submitter_pubkey,
                 submitted_at_slot, submitted_at_tx, submitted_at_timestamp,
                 signature_count
          FROM attestations
-         WHERE schema_id = $1 AND payload_hash = $2",
+         WHERE id = $1",
     )
-    .bind(schema_id)
-    .bind(payload_hash)
+    .bind(id)
     .fetch_optional(pool)
     .await?;
     Ok(row.map(attestation_row_from_tuple))
@@ -949,6 +952,7 @@ fn attestation_row_from_tuple(
         String,
         String,
         String,
+        String,
         Option<String>,
         i64,
         String,
@@ -957,14 +961,15 @@ fn attestation_row_from_tuple(
     ),
 ) -> AttestationRow {
     AttestationRow {
-        schema_id: t.0,
-        payload_hash: t.1,
-        submitter: t.2,
-        submitter_pubkey: t.3,
-        submitted_at_slot: t.4,
-        submitted_at_tx: t.5,
-        submitted_at_timestamp: t.6,
-        signature_count: t.7,
+        id: t.0,
+        schema_id: t.1,
+        payload_hash: t.2,
+        submitter: t.3,
+        submitter_pubkey: t.4,
+        submitted_at_slot: t.5,
+        submitted_at_tx: t.6,
+        submitted_at_timestamp: t.7,
+        signature_count: t.8,
     }
 }
 
@@ -1085,38 +1090,33 @@ pub async fn attestor_set_exists(pool: &PgPool, id: &str) -> sqlx::Result<bool> 
         .await
 }
 
-/// "Does this exact (schema_id, payload_hash) attestation exist?" —
-/// used by `/v1/search` when the input is a composite
-/// `lsc1…:lph1…` form. Different from `attestation_by_payload_hash`
-/// which scans all schemas for a given payload.
-pub async fn attestation_pair_exists(
-    pool: &PgPool,
-    schema_id: &str,
-    payload_hash: &str,
-) -> sqlx::Result<bool> {
-    sqlx::query_scalar(
-        "SELECT EXISTS(
-            SELECT 1 FROM attestations
-            WHERE schema_id = $1 AND payload_hash = $2
-        )",
-    )
-    .bind(schema_id)
-    .bind(payload_hash)
-    .fetch_one(pool)
-    .await
+/// "Does this `lat1...` AttestationId exist?", used by `/v1/search`
+/// when the input is a `lat1...` string. v0.2.0 replaced the prior
+/// `attestation_pair_exists((schema_id, payload_hash))` helper; the
+/// id is the canonical key now. Same `EXISTS(...)` pattern as the
+/// other `*_exists` helpers above.
+pub async fn attestation_id_exists(pool: &PgPool, id: &str) -> sqlx::Result<bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM attestations WHERE id = $1)")
+        .bind(id)
+        .fetch_one(pool)
+        .await
 }
 
-/// "Which schema's attestation has this payload hash?" — used by
-/// `/v1/search` when the input is a `lph1...` (payload hash). Returns
-/// the (schema_id, payload_hash) pair of the first match, or `None`.
-/// In v0 we return at most one; explorers wanting all matches can
-/// scan `/v1/schemas/{id}/attestations` per schema.
-pub async fn attestation_by_payload_hash(
+/// "Which attestation has this payload hash?", used by `/v1/search`
+/// when the input is a `lph1...` (payload hash). Returns the
+/// `lat1...` AttestationId of the first match, or `None`. The same
+/// payload hash can land under multiple schemas, so this is "first
+/// match wins" by `(submitted_at_slot, schema_id)`; callers that need
+/// all matches scan `/v1/schemas/{id}/attestations` per schema.
+pub async fn attestation_id_by_payload_hash(
     pool: &PgPool,
     payload_hash: &str,
-) -> sqlx::Result<Option<(String, String)>> {
-    sqlx::query_as(
-        "SELECT schema_id, payload_hash FROM attestations WHERE payload_hash = $1 LIMIT 1",
+) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT id FROM attestations
+         WHERE payload_hash = $1
+         ORDER BY submitted_at_slot DESC, schema_id ASC
+         LIMIT 1",
     )
     .bind(payload_hash)
     .fetch_optional(pool)

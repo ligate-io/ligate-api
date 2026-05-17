@@ -12,7 +12,7 @@
 //! - u64 / i64 → JSON number (chain values comfortably fit in f64)
 //! - timestamps → RFC3339 with millisecond precision (`2026-05-09T01:23:45.678Z`)
 //! - tx / block hashes → bech32m (`ltx1...`, `lblk1...`) since `ligate-chain@0ac7e5b`
-//! - identifiers → bech32m (`lig1`, `lsc1`, `las1`, `lph1`, `lpk1`, `token_1`)
+//! - identifiers → bech32m (`lig1`, `lsc1`, `las1`, `lat1`, `lph1`, `lpk1`, `token_1`)
 //! - optional fields → always present, `null` when absent
 //!
 //! List endpoints wrap their data in [`Page`] per RFC 0001's cursor
@@ -355,14 +355,14 @@ pub struct Pagination {
 /// element of `GET /v1/attestations` / `/v1/schemas/{id}/attestations`
 /// / `/v1/attestor-sets/{id}/attestations`.
 ///
-/// `id` is the compound `<schema_id>:<payload_hash>` form that
-/// `/v1/attestations/{id}` accepts as a path parameter. Surfaced
-/// separately from the constituent `schema_id` + `payload_hash`
-/// fields so partners can pass `id` opaquely to deep-link routes
-/// without re-composing it themselves.
+/// `id` is the v0.2.0 canonical `lat1...` AttestationId, the bech32m
+/// form of SHA-256(`schema_id_bytes` || `payload_hash_bytes`). The
+/// constituent `schema_id` + `payload_hash` are surfaced separately
+/// so partners that need the components don't have to fetch the
+/// schema or chain to recover them.
 #[derive(Debug, Serialize)]
 pub struct AttestationResponse {
-    /// Compound `<schema_id>:<payload_hash>` id (both bech32m).
+    /// Bech32m `lat1...` AttestationId.
     pub id: String,
     /// Bech32m `lsc1...` schema id this attestation is bound to.
     pub schema_id: String,
@@ -404,9 +404,13 @@ pub struct AttestationResponse {
 /// { "kind": "address", "address": "lig1..." }
 /// { "kind": "schema", "schema_id": "lsc1..." }
 /// { "kind": "attestor_set", "attestor_set_id": "las1..." }
-/// { "kind": "attestation", "schema_id": "lsc1...", "payload_hash": "lph1..." }
+/// { "kind": "attestation", "id": "lat1..." }
 /// { "kind": "not_found", "query": "..." }
 /// ```
+///
+/// The `attestation` variant returns only the canonical `lat1...` id
+/// (v0.2.0). Clients that need the constituent `schema_id` +
+/// `payload_hash` fetch `/v1/attestations/{id}` for the full body.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SearchResponse {
@@ -426,8 +430,8 @@ pub enum SearchResponse {
         attestor_set_id: String,
     },
     Attestation {
-        schema_id: String,
-        payload_hash: String,
+        /// Bech32m `lat1...` AttestationId.
+        id: String,
     },
     NotFound {
         query: String,

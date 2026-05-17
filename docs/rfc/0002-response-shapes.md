@@ -51,6 +51,7 @@ cheaper than refactoring three repos. Specifically:
 | Address | bech32m `lig1...` | Canonical, no hex variants |
 | Schema id | bech32m `lsc1...` | Canonical |
 | Attestor set id | bech32m `las1...` | Canonical |
+| Attestation id | bech32m `lat1...` | Canonical (v0.2.0; SHA-256 of `schema_id` ‖ `payload_hash`) |
 | Payload hash | bech32m `lph1...` | Canonical |
 | Pubkey | bech32m `lpk1...` | Canonical |
 | Token id | bech32m `token_1...` | Canonical |

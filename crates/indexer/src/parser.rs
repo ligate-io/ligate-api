@@ -163,6 +163,11 @@ pub struct IndexerRegisterSchema {
 /// Decoded `submit_attestation` details.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexerSubmitAttestation {
+    /// Canonical `lat1...` AttestationId derived from
+    /// `(schema_id, payload_hash)` via
+    /// [`crate::attestation_id::compute_attestation_id`]. Matches the
+    /// chain's `AttestationId::from_pair(...).to_string()`.
+    pub id: String,
     /// Schema id (bech32m `lsc1...`).
     pub schema_id: String,
     /// Payload hash (bech32m `lph1...`).
@@ -284,12 +289,38 @@ fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
                     serde_json::from_value::<AttestationAttestationSubmittedEvent>(ev.value.clone())
                 {
                     let d = payload.attestation_submitted;
-                    return IndexerTx::SubmitAttestation(IndexerSubmitAttestation {
-                        schema_id: d.schema_id,
-                        payload_hash: d.payload_hash,
-                        submitter: d.submitter,
-                        signature_count: d.signature_count,
-                    });
+                    // Collapse `(schema_id, payload_hash)` into the
+                    // canonical v0.2.0 `lat1...` AttestationId at
+                    // ingest time. Chain emits the pair; the indexer
+                    // mirrors the chain's `AttestationId::from_pair`
+                    // derivation so reads can resolve by id directly.
+                    match crate::attestation_id::compute_attestation_id(
+                        &d.schema_id,
+                        &d.payload_hash,
+                    ) {
+                        Ok(id) => {
+                            return IndexerTx::SubmitAttestation(IndexerSubmitAttestation {
+                                id,
+                                schema_id: d.schema_id,
+                                payload_hash: d.payload_hash,
+                                submitter: d.submitter,
+                                signature_count: d.signature_count,
+                            });
+                        }
+                        Err(e) => {
+                            // Chain emitted a malformed pair (would
+                            // be a chain-side regression). Skip the
+                            // event rather than crash; the tx falls
+                            // through to `Unknown` and shows up in
+                            // forensics via `event_keys`.
+                            tracing::warn!(
+                                error = %e,
+                                schema_id = %d.schema_id,
+                                payload_hash = %d.payload_hash,
+                                "AttestationSubmitted: cannot derive lat1 id, skipping",
+                            );
+                        }
+                    }
                 }
             }
             _ => {}
@@ -325,8 +356,18 @@ fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use bech32::{Bech32m, Hrp};
     use ligate_api_types::{FullyBakedTx, TxReceipt, Uint64Range};
+
+    use super::*;
+    use crate::attestation_id::compute_attestation_id;
+
+    /// bech32m-encode `data` under `hrp`. Used to mint valid
+    /// `lsc1.../lph1...` fixtures the new parser path can decode.
+    fn bech32m(hrp: &str, data: &[u8]) -> String {
+        let hrp = Hrp::parse(hrp).unwrap();
+        bech32::encode::<Bech32m>(hrp, data).unwrap()
+    }
 
     fn fixture_tx(receipt_result: &str) -> LedgerTx {
         LedgerTx {
@@ -520,15 +561,22 @@ mod tests {
 
     #[test]
     fn classify_recognises_attestation_submitted() {
+        // schema_id + payload_hash must be valid bech32m so the parser
+        // can derive the canonical `lat1...` AttestationId at ingest.
+        let schema_id = bech32m("lsc", &[0x11u8; 32]);
+        let payload_hash = bech32m("lph", &[0x22u8; 32]);
+        let expected_id =
+            compute_attestation_id(&schema_id, &payload_hash).expect("derive lat1 id");
+
         let event = LedgerEvent {
             r#type: "event".into(),
             number: 1,
             key: "AttestationModule/AttestationSubmitted".into(),
             value: serde_json::json!({
                 "AttestationSubmitted": {
-                    "schema_id": "lsc1abc",
-                    "payload_hash": "lph1abc",
-                    "submitter": "lig1submitter",
+                    "schema_id":       schema_id,
+                    "payload_hash":    payload_hash,
+                    "submitter":       "lig1submitter",
                     "signature_count": 3
                 }
             }),
@@ -542,12 +590,47 @@ mod tests {
         let classified = classify_tx(&tx, &[&event]).expect("not skipped");
         match classified.kind {
             IndexerTx::SubmitAttestation(d) => {
-                assert_eq!(d.schema_id, "lsc1abc");
-                assert_eq!(d.payload_hash, "lph1abc");
+                assert_eq!(d.id, expected_id, "lat1 id derived at ingest");
+                assert!(d.id.starts_with("lat1"));
+                assert_eq!(d.schema_id, bech32m("lsc", &[0x11u8; 32]));
+                assert_eq!(d.payload_hash, bech32m("lph", &[0x22u8; 32]));
                 assert_eq!(d.submitter, "lig1submitter");
                 assert_eq!(d.signature_count, 3);
             }
             other => panic!("expected SubmitAttestation, got {other:?}"),
+        }
+    }
+
+    /// If the chain ever emits a malformed `(schema_id, payload_hash)`
+    /// pair (chain-side regression), the parser logs and falls
+    /// through to `Unknown` instead of crashing the ingest loop.
+    #[test]
+    fn submit_attestation_with_malformed_pair_falls_through_to_unknown() {
+        let event = LedgerEvent {
+            r#type: "event".into(),
+            number: 1,
+            key: "AttestationModule/AttestationSubmitted".into(),
+            value: serde_json::json!({
+                "AttestationSubmitted": {
+                    "schema_id":       "lsc1notbech32m",
+                    "payload_hash":    "lph1alsobad",
+                    "submitter":       "lig1submitter",
+                    "signature_count": 1
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "AttestationModule".into(),
+            },
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
+        };
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::Unknown { event_keys } => {
+                assert_eq!(event_keys, vec!["AttestationModule/AttestationSubmitted"]);
+            }
+            other => panic!("expected Unknown, got {other:?}"),
         }
     }
 
