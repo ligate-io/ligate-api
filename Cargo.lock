@@ -3939,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "ligate-api"
-version = "0.0.1"
+version = "0.1.0-devnet"
 dependencies = [
  "anyhow",
  "axum",
@@ -3964,7 +3964,7 @@ dependencies = [
 
 [[package]]
 name = "ligate-api-drip"
-version = "0.0.1"
+version = "0.1.0-devnet"
 dependencies = [
  "anyhow",
  "borsh",
@@ -3986,7 +3986,7 @@ dependencies = [
 
 [[package]]
 name = "ligate-api-indexer"
-version = "0.0.1"
+version = "0.1.0-devnet"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4005,7 +4005,7 @@ dependencies = [
 
 [[package]]
 name = "ligate-api-types"
-version = "0.0.1"
+version = "0.1.0-devnet"
 dependencies = [
  "chrono",
  "serde",

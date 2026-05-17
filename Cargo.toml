@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0-devnet"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 authors = ["Ligate Labs <hello@ligate.io>"]
@@ -19,9 +19,9 @@ rust-version = "1.93"
 
 [workspace.dependencies]
 # Internal — keep paths so each crate compiles standalone for tests.
-ligate-api-drip    = { path = "crates/drip", version = "0.0.1" }
-ligate-api-indexer = { path = "crates/indexer", version = "0.0.1" }
-ligate-api-types   = { path = "crates/types", version = "0.0.1" }
+ligate-api-drip    = { path = "crates/drip", version = "0.1.0-devnet" }
+ligate-api-indexer = { path = "crates/indexer", version = "0.1.0-devnet" }
+ligate-api-types   = { path = "crates/types", version = "0.1.0-devnet" }
 
 # HTTP server. axum 0.8 to match what chain crates pull in (avoids a
 # duplicate axum in the dep tree) and to use the `{name}` path-param

@@ -209,6 +209,10 @@ The test is skipped (not failed) when `DATABASE_URL` is unset, so plain `cargo t
 
 **Devnet.** `ligate-devnet-1` is live and the full v0 surface above is wired and serving. Faucet (`/v1/drip*`), explorer-facing indexer queries (`/v1/blocks*`, `/v1/txs*`, `/v1/addresses/*`, `/v1/schemas*`, `/v1/attestor-sets*`, `/v1/attestations*`, `/v1/search`), and analytics stats (`/v1/stats/*`) all hit Postgres. Pagination shapes, cache headers, and per-address drip status landed across PRs #44 to #55.
 
+## Versioning
+
+Tags use clean semver going forward (`vX.Y.Z`, no `-devnet` suffix). The current tag `v0.1.0-devnet` and the matching workspace version predate the convention adopted in `ligate-chain` v0.1.2 (chain#374, 2026-05-17); the next release here drops the suffix. Network identity stays in `chain_id` and genesis dir names, not in the binary tag.
+
 ## Related repos
 
 - [`ligate-chain`](https://github.com/ligate-io/ligate-chain) — Sovereign SDK rollup; `ligate-api` consumes its REST surface
