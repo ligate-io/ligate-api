@@ -119,9 +119,9 @@ cargo run --bin ligate-node
 cd ~/Desktop/ligate-api
 DATABASE_URL=postgres://postgres:local@localhost:5432/ligate_api \
 CHAIN_RPC=http://localhost:12346 \
-CHAIN_ID=4321 \
+CHAIN_ID=4242 \
 CHAIN_HASH=$(curl -s http://localhost:12346/v1/rollup/info | jq -r .chain_hash) \
-LGT_TOKEN_ID=$(jq -r .gas_token_config.token_id ~/Desktop/ligate-chain/devnet/genesis/bank.json | sed 's/^token_/...convert.../') \
+LGT_TOKEN_ID=token_1nyl0e0yweragfsatygt24zmd8jrr2vqtvdfptzjhxkguz2xxx3vs0y07u7 \
 DRIP_SIGNER_KEY=0101010101010101010101010101010101010101010101010101010101010101 \
 DRIP_MIN_BUDGET=0 \
 cargo run --bin ligate-api
@@ -130,6 +130,8 @@ cargo run --bin ligate-api
 curl http://localhost:8080/v1/health
 curl http://localhost:8080/v1/drip/status
 ```
+
+`CHAIN_ID=4242` is the numeric chain id used by `ligate-devnet-1` and the localnet genesis we ship in `ligate-chain/devnet/`. The Sovereign SDK demo default is `4321`; do not use it, your txs won't include in the local chain. `LGT_TOKEN_ID` is the canonical `$LGT` token id minted by `devnet/genesis/bank.json`; it's a stable constant, no derivation step needed.
 
 The dev key (`0x01...01`) is the chain's localnet dev keypair — pre-funded with 10000 LGT in `devnet/genesis/bank.json`. Don't use it on devnet/testnet/mainnet.
 
