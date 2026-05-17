@@ -15,22 +15,64 @@ Two deploy artifacts (one Rust binary, one Postgres) instead of three repos and 
 
 ## Endpoints (v0)
 
+All endpoints are wired and serving on `ligate-devnet-1`. Grouped by surface:
+
 ```
-GET  /v1/health               → 200 {"status":"ok"}
-GET  /v1/info                 → chain_id, chain_hash, version, latest_block, tx_per_second
-POST /v1/drip                 → body {address}, returns {tx_hash, amount_nano}
-GET  /v1/drip/status          → drip_amount, rate_limit_secs, addresses_dripped, faucet_address
-GET  /v1/blocks               → paginated list of latest blocks
-GET  /v1/blocks/{height}      → block detail
-GET  /v1/txs                  → paginated list of latest txs
-GET  /v1/txs/{hash}           → tx detail
-GET  /v1/addresses/{addr}     → balance + recent tx history
-GET  /v1/schemas              → list of registered schemas
-GET  /v1/schemas/{id}         → schema detail
-GET  /v1/attestor-sets/{id}   → attestor-set detail
+# Health / info
+GET  /health                                 → 200 {"status":"ok"} (unversioned; orchestrator probe)
+GET  /v1/health                              → 200 {"status":"ok"}
+GET  /v1/info                                → chain_id, chain_hash, version,
+                                                indexer_height, head_height, head_lag_slots
+
+# Blocks
+GET  /v1/blocks                              → paginated list of latest blocks
+GET  /v1/blocks/{height}                     → block detail
+
+# Transactions
+GET  /v1/txs                                 → paginated list of latest txs (?block_height, ?kind)
+GET  /v1/txs/{hash}                          → tx detail
+
+# Addresses
+GET  /v1/addresses/{addr}                    → balance + recent tx history
+GET  /v1/addresses/{addr}/txs                → paginated tx history for one address
+
+# Schemas
+GET  /v1/schemas                             → list of registered schemas (?attestor_set_id)
+GET  /v1/schemas/{id}                        → schema detail (incl. threshold join)
+GET  /v1/schemas/{id}/attestations           → attestations for one schema
+
+# Attestor sets
+GET  /v1/attestor-sets                       → list of registered attestor sets
+GET  /v1/attestor-sets/{id}                  → attestor-set detail
+GET  /v1/attestor-sets/{id}/attestations     → attestations for one attestor set
+
+# Attestations
+GET  /v1/attestations                        → paginated list of latest attestations
+GET  /v1/attestations/{id}                   → attestation detail (composite id)
+
+# Search
+GET  /v1/search                              → unified lookup (lig1, ltx1, lsc1, las1, block height)
+
+# Stats (in-process 30s cache; powers explorer + investor dashboard)
+GET  /v1/stats/totals                        → cumulative totals across the chain
+GET  /v1/stats/finality                      → finality lag + last-finalized slot
+GET  /v1/stats/next-block-eta                → predicted next-block-at (uses true indexer lag)
+GET  /v1/stats/active-addresses              → active-addresses windows
+GET  /v1/stats/new-wallets-daily             → daily new-wallet counts
+GET  /v1/stats/tx-rate-daily                 → daily tx-rate timeseries
+GET  /v1/stats/attestations-daily            → daily attestations (powers 30d heatmap)
+GET  /v1/stats/top-holders                   → top LGT holders
+
+# Faucet / drip
+POST /v1/drip                                → body {address}, returns
+                                                {address, tx_hash, amount_nano, drip_amount_lgt}
+GET  /v1/drip/status                         → drip_amount_nano, drip_amount_lgt,
+                                                rate_limit_secs, addresses_dripped, faucet_address
+GET  /v1/drip/status?address={addr}          → {can_drip, next_drip_at} (per-address shape;
+                                                untagged enum, same path)
 ```
 
-In v0, `/v1/drip*` are the only fully-wired endpoints. The indexer query handlers return `501 Not Implemented` with a tracking-issue link — they get fleshed out in subsequent PRs as the indexer's Postgres schema stabilises.
+Per `crates/api/src/main.rs:217-258`. Pagination shapes, cache headers, and error envelope are documented in `docs/rfcs/` and `docs/queries.md`.
 
 ## Architecture
 
@@ -163,7 +205,7 @@ The test is skipped (not failed) when `DATABASE_URL` is unset, so plain `cargo t
 
 ## Status
 
-**Devnet.** Day-1 surface is `/v1/drip*` only; indexer query endpoints get fleshed out across subsequent PRs as the Postgres schema solidifies. `ligate-devnet-1` is live.
+**Devnet.** `ligate-devnet-1` is live and the full v0 surface above is wired and serving. Faucet (`/v1/drip*`), explorer-facing indexer queries (`/v1/blocks*`, `/v1/txs*`, `/v1/addresses/*`, `/v1/schemas*`, `/v1/attestor-sets*`, `/v1/attestations*`, `/v1/search`), and analytics stats (`/v1/stats/*`) all hit Postgres. Pagination shapes, cache headers, and per-address drip status landed across PRs #44 to #55.
 
 ## Related repos
 
