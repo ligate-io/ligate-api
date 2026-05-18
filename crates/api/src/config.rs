@@ -8,6 +8,16 @@ const DEFAULT_DRIP_RATE_LIMIT_SECS: u64 = 24 * 60 * 60; // 24h per address
 const DEFAULT_DRIP_MIN_BUDGET: u64 = 100;
 const DEFAULT_PG_POOL_SIZE: u32 = 10;
 
+// Discord faucet bot (`POST /v1/drip-bot`) defaults. Independent of the
+// web faucet's 100 LGT / 24h. Tier amounts in nano-LGT. The cooldown
+// applies INDEPENDENTLY to both the per-address and per-Discord-user
+// counters; both must clear for a drip to succeed.
+const DEFAULT_BOT_DRIP_RATE_LIMIT_SECS: u64 = 5 * 24 * 60 * 60; // 5 days
+const DEFAULT_BOT_DRIP_AMOUNT_NEWCOMER: u128 = 100_000_000_000; //  100 LGT (server tenure < 7d)
+const DEFAULT_BOT_DRIP_AMOUNT_REGULAR: u128 = 250_000_000_000; //  250 LGT (7-30d tenure)
+const DEFAULT_BOT_DRIP_AMOUNT_VETERAN: u128 = 500_000_000_000; //  500 LGT (30-90d tenure)
+const DEFAULT_BOT_DRIP_AMOUNT_ELDER: u128 = 1_000_000_000_000; // 1000 LGT (90d+ tenure)
+
 /// All env-derived runtime config for `ligate-api`.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -75,6 +85,33 @@ pub struct Config {
     /// real treasury at `chain/devnet-1/genesis/bank.json`; partners
     /// running their own chain copy can leave this unset.
     pub lgt_treasury_addr: Option<String>,
+
+    /// Shared secret for the Discord faucet bot (`POST /v1/drip-bot`).
+    /// The bot sends this in the `X-Bot-Secret` header on every call.
+    /// `None` (FAUCET_BOT_SECRET unset) disables the endpoint entirely
+    /// — the route is still mounted but every request 401s.
+    ///
+    /// Generate with `python3 -c 'import secrets; print(secrets.token_hex(32))'`
+    /// and set the same value on both the api Railway env and the
+    /// `ligate-faucet-bot` Railway env. Rotate by setting a new value
+    /// on both sides simultaneously (brief window where in-flight
+    /// requests with the old secret 401 — acceptable for a slash
+    /// command).
+    pub faucet_bot_secret: Option<String>,
+
+    /// Per-counter cooldown for `POST /v1/drip-bot`, in seconds.
+    /// Default 5 days. Applies independently to the per-address
+    /// counter AND the per-Discord-user counter; both must clear.
+    pub bot_drip_rate_limit_secs: u64,
+
+    /// Tiered drip amounts in nano-LGT, keyed by Discord server tenure.
+    /// Bot computes the tier from `member.joinedAt`; api re-validates
+    /// the amount the bot claims matches the tier the bot also claims
+    /// (so a compromised bot can't unilaterally over-drip).
+    pub bot_drip_amount_newcomer: u128, //  < 7 days in server
+    pub bot_drip_amount_regular: u128, //  7-30 days
+    pub bot_drip_amount_veteran: u128, // 30-90 days
+    pub bot_drip_amount_elder: u128,   // 90+ days
 }
 
 impl Config {
@@ -146,6 +183,29 @@ impl Config {
 
         let lgt_treasury_addr = std::env::var("LGT_TREASURY_ADDR").ok();
 
+        // Discord faucet bot config (all optional; bot endpoint
+        // disabled if FAUCET_BOT_SECRET is unset).
+        let faucet_bot_secret = std::env::var("FAUCET_BOT_SECRET").ok().and_then(|s| {
+            // Empty string is treated the same as unset so an operator
+            // can disable the bot endpoint by emptying the env var in
+            // the Railway dashboard without removing it.
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        });
+        let bot_drip_rate_limit_secs =
+            parse_env_u64("BOT_DRIP_RATE_LIMIT_SECS", DEFAULT_BOT_DRIP_RATE_LIMIT_SECS)?;
+        let bot_drip_amount_newcomer =
+            parse_env_u128("BOT_DRIP_AMOUNT_NEWCOMER", DEFAULT_BOT_DRIP_AMOUNT_NEWCOMER)?;
+        let bot_drip_amount_regular =
+            parse_env_u128("BOT_DRIP_AMOUNT_REGULAR", DEFAULT_BOT_DRIP_AMOUNT_REGULAR)?;
+        let bot_drip_amount_veteran =
+            parse_env_u128("BOT_DRIP_AMOUNT_VETERAN", DEFAULT_BOT_DRIP_AMOUNT_VETERAN)?;
+        let bot_drip_amount_elder =
+            parse_env_u128("BOT_DRIP_AMOUNT_ELDER", DEFAULT_BOT_DRIP_AMOUNT_ELDER)?;
+
         Ok(Self {
             bind,
             database_url,
@@ -161,6 +221,12 @@ impl Config {
             drip_starting_nonce,
             indexer_start_height,
             lgt_treasury_addr,
+            faucet_bot_secret,
+            bot_drip_rate_limit_secs,
+            bot_drip_amount_newcomer,
+            bot_drip_amount_regular,
+            bot_drip_amount_veteran,
+            bot_drip_amount_elder,
         })
     }
 }

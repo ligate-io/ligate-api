@@ -70,6 +70,21 @@ GET  /v1/drip/status                         → drip_amount_nano, drip_amount_l
                                                 rate_limit_secs, addresses_dripped, faucet_address
 GET  /v1/drip/status?address={addr}          → {can_drip, next_drip_at} (per-address shape;
                                                 untagged enum, same path)
+
+# Discord faucet bot (header-gated; uses same signer as /v1/drip)
+POST /v1/drip-bot                            → header X-Bot-Secret required;
+                                                body {address, discord_user_id, tier,
+                                                amount_nano, tier_evidence?}; returns
+                                                {tx_hash, amount_nano, tier,
+                                                next_drip_available_at}.
+                                                Tier amounts (configurable):
+                                                  newcomer (<7d in server)  → 100 LGT
+                                                  regular   (7-30d)         → 250 LGT
+                                                  veteran   (30-90d)        → 500 LGT
+                                                  elder     (90+d)          → 1000 LGT
+                                                Independent 5-day cooldown
+                                                on per-address AND per-Discord-user;
+                                                independent of /v1/drip's per-address counter.
 ```
 
 Per `crates/api/src/main.rs:217-258`. Pagination shapes, cache headers, and error envelope are documented in `docs/rfcs/` and `docs/queries.md`.
