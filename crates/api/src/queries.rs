@@ -44,6 +44,13 @@ pub struct SlotRow {
     /// before we tracked it. See indexer's `repoll_pending_loop`
     /// for how this is populated.
     pub finalized_at: Option<DateTime<Utc>>,
+    /// Celestia (DA) block height where this slot's first batch
+    /// landed. Source: indexer's `extract_slot_first_batch_facts`,
+    /// reading `receipt.da_block_height` from the chain JSON (chain
+    /// v0.2.3+, ligate-io/ligate-chain#355). `None` on rows ingested
+    /// before chain v0.2.3 (no backfill yet) or whose first-batch
+    /// fetch failed. Powers the explorer's Celenium deep-link.
+    pub da_block_height: Option<i64>,
 }
 
 /// Read the highest slot height the indexer has written. `None` for
@@ -61,7 +68,7 @@ pub async fn max_slot_height(pool: &PgPool) -> sqlx::Result<Option<i64>> {
 pub async fn slot_by_height(pool: &PgPool, height: i64) -> sqlx::Result<Option<SlotRow>> {
     let row = sqlx::query_as::<_, SlotTuple>(
         "SELECT height, hash, prev_hash, state_root, timestamp,
-                batch_count, tx_count, proposer, finality_status, finalized_at
+                batch_count, tx_count, proposer, finality_status, finalized_at, da_block_height
          FROM slots WHERE height = $1",
     )
     .bind(height)
@@ -87,6 +94,7 @@ type SlotTuple = (
     Option<String>,        // proposer
     Option<String>,        // finality_status
     Option<DateTime<Utc>>, // finalized_at
+    Option<i64>,           // da_block_height
 );
 
 fn slot_row_from_tuple(t: SlotTuple) -> SlotRow {
@@ -101,6 +109,7 @@ fn slot_row_from_tuple(t: SlotTuple) -> SlotRow {
         proposer,
         finality_status,
         finalized_at,
+        da_block_height,
     ) = t;
     SlotRow {
         height,
@@ -113,6 +122,7 @@ fn slot_row_from_tuple(t: SlotTuple) -> SlotRow {
         proposer,
         finality_status,
         finalized_at,
+        da_block_height,
     }
 }
 
@@ -137,7 +147,7 @@ pub async fn slots_page(
         Some(h) => {
             sqlx::query_as(
                 "SELECT height, hash, prev_hash, state_root, timestamp,
-                        batch_count, tx_count, proposer, finality_status, finalized_at
+                        batch_count, tx_count, proposer, finality_status, finalized_at, da_block_height
                  FROM slots
                  WHERE height < $1
                  ORDER BY height DESC
@@ -151,7 +161,7 @@ pub async fn slots_page(
         None => {
             sqlx::query_as(
                 "SELECT height, hash, prev_hash, state_root, timestamp,
-                        batch_count, tx_count, proposer, finality_status, finalized_at
+                        batch_count, tx_count, proposer, finality_status, finalized_at, da_block_height
                  FROM slots
                  ORDER BY height DESC
                  LIMIT $1",
