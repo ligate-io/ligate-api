@@ -129,7 +129,8 @@ pub struct BlockResponse {
     /// `receipt.da_block_height` field (added in chain v0.2.3 per
     /// ligate-io/ligate-chain#355). Powers the explorer's
     /// "View on Celenium" deep-link: the per-block UI builds
-    /// `https://mocha.celenium.io/blocks/{da_block_height}`.
+    /// `https://mocha.celenium.io/block/{da_block_height}` (singular
+    /// `/block/`; `/blocks` is the list page and 404s on detail).
     ///
     /// `null` for blocks indexed before this field shipped (chain
     /// v0.2.2 and earlier did not emit it; no backfill yet) and for
