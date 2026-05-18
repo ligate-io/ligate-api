@@ -124,6 +124,18 @@ pub struct BlockResponse {
     /// `/v1/stats/finality`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalized_at: Option<String>,
+    /// Celestia (DA) block height where this slot's first batch's
+    /// blob was included. Extracted by the indexer from the chain's
+    /// `receipt.da_block_height` field (added in chain v0.2.3 per
+    /// ligate-io/ligate-chain#355). Powers the explorer's
+    /// "View on Celenium" deep-link: the per-block UI builds
+    /// `https://mocha.celenium.io/blocks/{da_block_height}`.
+    ///
+    /// `null` for blocks indexed before this field shipped (chain
+    /// v0.2.2 and earlier did not emit it; no backfill yet) and for
+    /// the rare slot whose first-batch fetch failed at ingest time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub da_block_height: Option<u64>,
 }
 
 /// One transaction, served at `GET /v1/txs/{hash}` and as each

@@ -80,7 +80,18 @@ pub async fn write_chain_identity(pool: &PgPool, info: &RollupInfo) -> Result<()
 /// observation, not the true chain finalization moment (chain
 /// doesn't emit that), but it's within one indexer poll interval
 /// of truth — accurate enough for `/v1/stats/finality` percentiles.
-pub async fn upsert_slot(pool: &PgPool, slot: &SlotResponse, proposer: Option<&str>) -> Result<()> {
+pub async fn upsert_slot(
+    pool: &PgPool,
+    slot: &SlotResponse,
+    proposer: Option<&str>,
+    // Celestia (DA) block height where this slot's first batch's blob
+    // was included. Extracted from `receipt.da_block_height` by the
+    // caller; `None` for slots ingested before chain v0.2.3 (the field
+    // didn't exist) or for slots whose first-batch fetch failed.
+    // Same COALESCE-preserve pattern as `proposer` so a re-poll that
+    // can't refetch batches doesn't blank a known value.
+    da_block_height: Option<i64>,
+) -> Result<()> {
     // Chain emits `slot.timestamp` as Unix MILLISECONDS (verified
     // against localnet: 1778527856952 → 2026-05-11T...). Earlier
     // code parsed via `timestamp_opt(s, 0)` which treats the input
@@ -115,7 +126,8 @@ pub async fn upsert_slot(pool: &PgPool, slot: &SlotResponse, proposer: Option<&s
     sqlx::query(
         "INSERT INTO slots (
             height, hash, prev_hash, state_root, timestamp,
-            batch_count, tx_count, proposer, finality_status, finalized_at, raw
+            batch_count, tx_count, proposer, finality_status, finalized_at, raw,
+            da_block_height
          )
          VALUES (
             $1, $2, $3, $4, $5,
@@ -126,7 +138,8 @@ pub async fn upsert_slot(pool: &PgPool, slot: &SlotResponse, proposer: Option<&s
             -- chain reports 'pending' first, so this is NULL and
             -- the re-poll loop will stamp NOW() on the flip.
             CASE WHEN $9 = 'finalized' THEN NOW() ELSE NULL END,
-            $10
+            $10,
+            $11
          )
          ON CONFLICT (height) DO UPDATE SET
             hash             = EXCLUDED.hash,
@@ -153,6 +166,11 @@ pub async fn upsert_slot(pool: &PgPool, slot: &SlotResponse, proposer: Option<&s
                 ELSE slots.finalized_at
             END,
             raw              = EXCLUDED.raw,
+            -- COALESCE-preserve for da_block_height too: a re-poll
+            -- that can't reach the first batch doesn't blank a known
+            -- height. Slots from chain v0.2.2 and earlier (no field)
+            -- stay NULL forever unless explicitly backfilled.
+            da_block_height  = COALESCE(EXCLUDED.da_block_height, slots.da_block_height),
             indexed_at       = NOW()",
     )
     .bind(slot.number as i64)
@@ -165,6 +183,7 @@ pub async fn upsert_slot(pool: &PgPool, slot: &SlotResponse, proposer: Option<&s
     .bind(proposer)
     .bind(slot.finality_status.as_deref())
     .bind(raw)
+    .bind(da_block_height)
     .execute(pool)
     .await?;
     Ok(())

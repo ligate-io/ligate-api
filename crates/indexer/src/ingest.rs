@@ -137,17 +137,24 @@ pub async fn run(client: NodeClient, pool: PgPool, start_height: Option<u64>) ->
             match client.slot_at(h).await {
                 Ok(Some(slot)) => {
                     // Fetch the proposer (sequencer's Celestia
-                    // `da_address`) from the slot's first batch.
-                    // Tolerates failure: a missing proposer just
-                    // leaves the column NULL; the slot still lands.
+                    // `da_address`) AND da_block_height from the slot's
+                    // first batch. Tolerates failure: missing values
+                    // just leave the columns NULL; the slot still lands.
                     // ingest_slot_transactions below will re-fetch
                     // batches for tx processing; we accept the
                     // duplicate fetch for ~6s/slot rate so the
-                    // slot upsert path stays simple. If this
-                    // becomes a hot path, refactor to share the
-                    // batch object between the two consumers.
-                    let proposer = extract_slot_proposer(&client, &slot).await;
-                    if let Err(e) = db::upsert_slot(&pool, &slot, proposer.as_deref()).await {
+                    // slot upsert path stays simple. If this becomes
+                    // a hot path, refactor to share the batch object
+                    // between the two consumers.
+                    let facts = extract_slot_first_batch_facts(&client, &slot).await;
+                    if let Err(e) = db::upsert_slot(
+                        &pool,
+                        &slot,
+                        facts.proposer.as_deref(),
+                        facts.da_block_height,
+                    )
+                    .await
+                    {
                         error!(error = %e, height = h, "writing slot; will retry");
                         tokio::time::sleep(ERROR_BACKOFF).await;
                         // Don't advance `next_height`; outer loop
@@ -466,8 +473,31 @@ async fn update_address_summaries(
 /// processing. Acceptable at devnet-1 rate (~1 slot per 6 seconds);
 /// if we ever need to optimize, refactor to share the LedgerBatch
 /// between both consumers.
-async fn extract_slot_proposer(client: &NodeClient, slot: &SlotResponse) -> Option<String> {
-    let batch_range = slot.batch_range.as_ref()?;
+/// Per-slot data we extract from the first batch's receipt. Tuple
+/// types stay in scope for both `extract_slot_first_batch_facts` and
+/// its caller in the forward-walk loop; promoting to a named struct
+/// is purely cosmetic at this size.
+#[derive(Default)]
+pub(crate) struct SlotFirstBatchFacts {
+    /// `receipt.da_address` — the sequencer's Celestia wallet. Same
+    /// semantics as before this change; named for clarity since the
+    /// tuple now carries two related fields.
+    pub proposer: Option<String>,
+    /// `receipt.da_block_height` — the Celestia mocha-4 block height
+    /// where the batch's blob was included. Source: chain v0.2.3+
+    /// (ligate-io/ligate-chain#355). `None` for batches produced
+    /// before the chain shipped the field, OR for batches whose
+    /// first-batch fetch failed.
+    pub da_block_height: Option<i64>,
+}
+
+async fn extract_slot_first_batch_facts(
+    client: &NodeClient,
+    slot: &SlotResponse,
+) -> SlotFirstBatchFacts {
+    let Some(batch_range) = slot.batch_range.as_ref() else {
+        return SlotFirstBatchFacts::default();
+    };
     let first_batch_number = batch_range.start;
     let batch = match client.batch_at(first_batch_number).await {
         Ok(Some(b)) => b,
@@ -475,32 +505,46 @@ async fn extract_slot_proposer(client: &NodeClient, slot: &SlotResponse) -> Opti
             debug!(
                 slot = slot.number,
                 batch = first_batch_number,
-                "first batch 404 during proposer extract; proposer stays NULL"
+                "first batch 404 during slot-facts extract; proposer + da_block_height stay NULL"
             );
-            return None;
+            return SlotFirstBatchFacts::default();
         }
         Err(e) => {
             debug!(
                 slot = slot.number,
                 batch = first_batch_number,
                 error = %e,
-                "first batch fetch failed during proposer extract; proposer stays NULL"
+                "first batch fetch failed during slot-facts extract; proposer + da_block_height stay NULL"
             );
-            return None;
+            return SlotFirstBatchFacts::default();
         }
     };
     // LedgerBatch's typed shape ends at `tx_range`; everything below
-    // is in the `raw` catch-all map. `receipt.da_address` is the
-    // path we care about. Multi-level Value drill-down with as_str()
-    // at the leaf — returns None on any missing layer or wrong type.
-    let da_address = batch
-        .raw
-        .get("receipt")?
-        .as_object()?
-        .get("da_address")?
-        .as_str()?
-        .to_string();
-    Some(da_address)
+    // is in the `raw` catch-all map. `receipt.da_address` +
+    // `receipt.da_block_height` are the two fields we extract here.
+    // Multi-level Value drill-down with type-checked leaves — returns
+    // None on any missing layer or wrong type.
+    let receipt = match batch.raw.get("receipt").and_then(|v| v.as_object()) {
+        Some(r) => r,
+        None => return SlotFirstBatchFacts::default(),
+    };
+    let proposer = receipt
+        .get("da_address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    // `da_block_height` came online in chain v0.2.3 via #355. Treat
+    // missing field, JSON null, or non-u64 shape as None — old
+    // batches from v0.2.2 and earlier have nothing here. Cast to
+    // i64 for the SQL bind (BIGINT). Celestia heights fit in i64
+    // for ~292 billion years at 1 block/sec, so the cast is safe.
+    let da_block_height = receipt
+        .get("da_block_height")
+        .and_then(|v| v.as_u64())
+        .and_then(|h| i64::try_from(h).ok());
+    SlotFirstBatchFacts {
+        proposer,
+        da_block_height,
+    }
 }
 
 /// Background task: scan for `finality_status = 'pending'` slots,

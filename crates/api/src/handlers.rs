@@ -547,6 +547,11 @@ fn slot_to_block_response(row: queries::SlotRow) -> BlockResponse {
         finalized_at: row
             .finalized_at
             .map(|t| t.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        // Cast i64 (SQL BIGINT) → u64 for the API surface. Celestia
+        // heights fit in i64 for ~292 billion years at 1 block/sec,
+        // so the cast is safe in practice. Stays `None` for slots
+        // ingested before chain v0.2.3 shipped the field.
+        da_block_height: row.da_block_height.map(|h| h as u64),
     }
 }
 
