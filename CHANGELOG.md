@@ -6,6 +6,13 @@ Format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). I
 
 ## [Unreleased]
 
+### Added
+
+- `POST /v1/drip-bot` endpoint for the Discord faucet bot. Header-gated via `X-Bot-Secret`; uses the same hot-key signer as `POST /v1/drip` so there's a single nonce stream and no inter-endpoint coordination. Tier-aware amounts validated server-side (100 / 250 / 500 / 1000 LGT for newcomer / regular / veteran / elder, by Discord server tenure). 5-day cooldown, applied independently to (a) per-address and (b) per-Discord-user counters; both must clear. Endpoint disabled (returns 503) if `FAUCET_BOT_SECRET` is unset, so safe to merge before the bot is deployed.
+- `bot_drips` Postgres table for durable cooldown state (`migrations/20260518000001_bot_drips.sql`). Two B-tree indexes on `(address, dripped_at DESC)` and `(discord_user_id, dripped_at DESC)` so each cooldown check is a single index seek. Cooldowns persisted to Postgres (not in-memory like the web faucet's `RateLimiter`) because Railway restarts during a 5-day window would otherwise lose multi-day cooldowns.
+- New `Config` fields: `FAUCET_BOT_SECRET` (None = endpoint disabled), `BOT_DRIP_RATE_LIMIT_SECS` (default 432000s = 5d), `BOT_DRIP_AMOUNT_{NEWCOMER,REGULAR,VETERAN,ELDER}` (defaults match the proposal). All env-tunable for later curve adjustments without code changes.
+- Stacking model: a user can hit both faucets on the same address: 100 LGT/24h from `/v1/drip` (anon) AND up to 1000 LGT/5d from `/v1/drip-bot` (Discord-tier). The two counters are independent so each clears on its own schedule.
+
 ## [0.2.1] - 2026-05-17
 
 Cut alongside `ligate-chain` v0.2.0, `ligate-cli` v0.2.0, `ligate-js` v0.2.0, and `ligate-explorer` for the cross-repo AttestationId wire-format change. Version jumps from `0.1.0-devnet` to `0.2.1` to align with the chain's clean-semver convention (chain#374) and reflect that this is the next breaking-compatible release on the api side.

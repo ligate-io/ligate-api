@@ -6,6 +6,11 @@
 //!   signs a `bank.transfer` to the requesting address, rate-limited
 //!   per-address. Ported from the (now-archived) `ligate-io/faucet`
 //!   repo.
+//! - **Discord faucet bot** — `POST /v1/drip-bot`. Same signer, tiered
+//!   amounts (100/250/500/1000 LGT by Discord server tenure), 5-day
+//!   cooldown persisted to Postgres. Gated on `X-Bot-Secret` header
+//!   so the larger amounts can't be hit by anonymous web callers.
+//!   See `crates/api/src/bot_drip.rs`.
 //! - **Indexer queries** — `GET /v1/blocks*`, `/v1/txs*`,
 //!   `/v1/addresses/*`, `/v1/schemas*`, `/v1/info`. Postgres-backed; the
 //!   indexer task running in the same process keeps the DB current.
@@ -48,6 +53,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
+mod bot_drip;
 mod config;
 mod cursor;
 mod handlers;
@@ -220,6 +226,12 @@ async fn main() -> Result<()> {
         .route("/v1/info", get(handlers::info))
         .route("/v1/drip", post(handlers::drip))
         .route("/v1/drip/status", get(handlers::drip_status))
+        // Discord faucet bot endpoint. Header-gated via X-Bot-Secret;
+        // tiered amounts; 5-day cooldown persisted to Postgres.
+        // Independent of the web faucet's per-address counter so a
+        // user can stack 100 LGT/24h (web) AND 100-1000 LGT/5d (bot)
+        // on the same address. Disabled if FAUCET_BOT_SECRET is unset.
+        .route("/v1/drip-bot", post(bot_drip::drip_bot))
         // Indexer queries — stubbed in v0; flesh out in subsequent PRs
         // once the indexer's slot/tx schemas stabilise.
         .route("/v1/blocks", get(handlers::blocks_list))
