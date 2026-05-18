@@ -61,6 +61,9 @@ GET  /v1/stats/active-addresses              → active-addresses windows
 GET  /v1/stats/new-wallets-daily             → daily new-wallet counts
 GET  /v1/stats/tx-rate-daily                 → daily tx-rate timeseries
 GET  /v1/stats/attestations-daily            → daily attestations (powers 30d heatmap)
+GET  /v1/stats/drips-daily                   → daily faucet drips, broken down by source
+                                                (web vs Discord bot); powers the cost
+                                                dashboard's drips-per-day panel
 GET  /v1/stats/top-holders                   → top LGT holders
 
 # Faucet / drip
