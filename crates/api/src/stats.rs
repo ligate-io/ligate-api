@@ -1017,6 +1017,144 @@ fn parse_interval(s: &str) -> anyhow::Result<Duration> {
     Ok(Duration::from_secs(seconds))
 }
 
+// ---- /drips-daily ----------------------------------------------------------
+//
+// Daily counts of faucet drips, broken down by source (web vs Discord bot).
+//
+// `web`: chain-side count — every `bank.transfer` tx with the faucet hot
+// wallet as `sender`. The web faucet's in-memory `RateLimiter` doesn't
+// persist drips, so we read the indexer's authoritative tx record
+// instead. Counts include all transfers from the faucet, which is the
+// right semantic for cost-monitoring even if some rare manual transfer
+// crept in (the faucet's only job is dripping).
+//
+// `bot`: api-side count from the `bot_drips` table (per the Discord
+// faucet bot's `/v1/drip-bot` flow). Captured directly when the api
+// signs + submits the drip transaction, so this is the canonical
+// per-Discord-call counter.
+//
+// `total`: sum. Powers the cost dashboard's "Drips per day" panel
+// without a Grafana-side reducer.
+
+#[derive(Deserialize)]
+pub struct DripsDailyQuery {
+    /// Days of history. Default 30 (matches the explorer / cost-dashboard
+    /// time window), capped at 90.
+    #[serde(default)]
+    days: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct DripsDailyPoint {
+    date: String,
+    web: i64,
+    bot: i64,
+    total: i64,
+}
+
+#[derive(Serialize)]
+struct DripsDailyResponse {
+    days: u32,
+    faucet_address: String,
+    points: Vec<DripsDailyPoint>,
+}
+
+/// `GET /v1/stats/drips-daily?days=N` — daily count of faucet drips,
+/// broken down by source (web vs Discord bot), for the trailing N days.
+/// Powers the cost dashboard's "Drips per day" stacked bar chart.
+pub async fn drips_daily(
+    State(state): State<AppState>,
+    Query(params): Query<DripsDailyQuery>,
+) -> Response {
+    let days = params.days.unwrap_or(30).min(90);
+    let faucet_addr = state.signer.address();
+    // Per-faucet-address cache key so the response is correct if the
+    // operator ever rotates the signer key without restarting.
+    let key = format!("drips-daily:{faucet_addr}:{days}");
+    if let Some(cached) = state.stats_cache.get_fresh(&key, DEFAULT_TTL) {
+        return cached_json_response(cached, TTL_STATS_DEFAULT_SECS);
+    }
+    match compute_drips_daily(&state.pg, days, &faucet_addr).await {
+        Ok(payload) => match serde_json::to_string(&payload) {
+            Ok(body) => {
+                state.stats_cache.put(key, body.clone());
+                cached_json_response(body, TTL_STATS_DEFAULT_SECS)
+            }
+            Err(e) => error_response(e.into()),
+        },
+        Err(e) => error_response(e),
+    }
+}
+
+async fn compute_drips_daily(
+    pool: &PgPool,
+    days: u32,
+    faucet_addr: &str,
+) -> anyhow::Result<DripsDailyResponse> {
+    let since = Utc::now() - chrono::Duration::days(days as i64);
+
+    // Web drips: every transfer from the faucet wallet, bucketed by day.
+    // Uses `indexed_at` (UTC at write time) rather than joining to
+    // `slots.block_timestamp`; the indexer lag is bounded at <60s in
+    // practice so daily buckets are identical between the two clocks.
+    let web_rows: Vec<(DateTime<Utc>, i64)> = sqlx::query_as(
+        "SELECT DATE_TRUNC('day', indexed_at) AS day, COUNT(*) AS count \
+         FROM transactions \
+         WHERE sender = $1 AND kind = 'transfer' AND indexed_at >= $2 \
+         GROUP BY day \
+         ORDER BY day ASC",
+    )
+    .bind(faucet_addr)
+    .bind(since)
+    .fetch_all(pool)
+    .await
+    .context("daily web-drips bucket")?;
+
+    // Bot drips: every successful POST /v1/drip-bot call (one row each).
+    let bot_rows: Vec<(DateTime<Utc>, i64)> = sqlx::query_as(
+        "SELECT DATE_TRUNC('day', dripped_at) AS day, COUNT(*) AS count \
+         FROM bot_drips \
+         WHERE dripped_at >= $1 \
+         GROUP BY day \
+         ORDER BY day ASC",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await
+    .context("daily bot-drips bucket")?;
+
+    // Merge by day. Postgres GROUP BY omits empty groups, so any day
+    // with zero drips for a given source needs to be filled in by us.
+    // We build a BTreeMap keyed on the day-string for cheap union +
+    // ordered iteration.
+    use std::collections::BTreeMap;
+    let mut by_day: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    for (day, count) in web_rows {
+        let key = day.format("%Y-%m-%d").to_string();
+        by_day.entry(key).or_insert((0, 0)).0 = count;
+    }
+    for (day, count) in bot_rows {
+        let key = day.format("%Y-%m-%d").to_string();
+        by_day.entry(key).or_insert((0, 0)).1 = count;
+    }
+
+    let points = by_day
+        .into_iter()
+        .map(|(date, (web, bot))| DripsDailyPoint {
+            date,
+            web,
+            bot,
+            total: web + bot,
+        })
+        .collect();
+
+    Ok(DripsDailyResponse {
+        days,
+        faucet_address: faucet_addr.to_string(),
+        points,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
