@@ -17,7 +17,7 @@ Format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). I
 
 ## [0.2.1] - 2026-05-17
 
-Cut alongside `ligate-chain` v0.2.0, `ligate-cli` v0.2.0, `ligate-js` v0.2.0, and `ligate-explorer` for the cross-repo AttestationId wire-format change. Version jumps from `0.1.0-devnet` to `0.2.1` to align with the chain's clean-semver convention (chain#374) and reflect that this is the next breaking-compatible release on the api side.
+Cut alongside `ligate-chain` v0.2.0, `ligate-cli` v0.2.0, `ligate-js` v0.2.0, and `ligate-explorer` for the cross-repo AttestationId wire-format change. Version jumps from `v0.1.0-devnet` to `v0.2.1` to align with the chain's clean-semver convention (chain#374) and reflect that this is the next breaking-compatible release on the api side.
 
 ### Changed (BREAKING — wire format)
 
