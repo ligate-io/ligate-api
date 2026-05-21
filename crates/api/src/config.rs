@@ -36,6 +36,14 @@ pub struct Config {
     /// `https://rpc.ligate.io`.
     pub chain_rpc: String,
 
+    /// Bearer token for the chain's internal `/v1/cluster/nodes`
+    /// endpoint. Caddy on the chain VM gates the endpoint behind
+    /// `Authorization: Bearer <token>`; without the token any caller
+    /// (including the api) sees 404. `None` is the dev / first-boot
+    /// state; the api returns `cluster_health: "unknown"` until the
+    /// token is configured. See chain#442 for the gate's design.
+    pub chain_cluster_auth_token: Option<String>,
+
     /// Numeric chain id (u64, NOT the human `ligate-devnet-1` string).
     /// From the chain's `chain_state.json`.
     pub chain_id: u64,
@@ -132,6 +140,10 @@ impl Config {
         let chain_rpc =
             std::env::var("CHAIN_RPC").unwrap_or_else(|_| "http://127.0.0.1:12346".to_string());
 
+        let chain_cluster_auth_token = std::env::var("CHAIN_CLUSTER_AUTH_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+
         let chain_id = std::env::var("CHAIN_ID")
             .context("CHAIN_ID is required (numeric, from chain_state.json)")?
             .parse::<u64>()
@@ -211,6 +223,7 @@ impl Config {
             database_url,
             pg_pool_size,
             chain_rpc,
+            chain_cluster_auth_token,
             chain_id,
             chain_hash,
             lgt_token_id_hex,
