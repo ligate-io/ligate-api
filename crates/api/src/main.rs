@@ -54,6 +54,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 mod bot_drip;
+mod cluster;
 mod config;
 mod cursor;
 mod handlers;
@@ -78,6 +79,10 @@ pub(crate) struct AppState {
     /// put on the api (every dashboard panel for every viewer would
     /// otherwise hit DB on every refresh).
     pub stats_cache: stats::StatsCache,
+    /// 5s in-process cache for `/v1/cluster/nodes`. Single-slot
+    /// (the endpoint takes no parameters), shared across concurrent
+    /// requests. See `cluster::ClusterCache`.
+    pub cluster_cache: cluster::ClusterCache,
 }
 
 #[tokio::main]
@@ -194,6 +199,7 @@ async fn main() -> Result<()> {
         rate_limiter: Arc::new(rate_limiter),
         pg: pg.clone(),
         stats_cache: stats::StatsCache::new(),
+        cluster_cache: cluster::ClusterCache::new(),
     };
 
     // Spawn the indexer ingest task in the background. If it panics or
@@ -269,6 +275,8 @@ async fn main() -> Result<()> {
         )
         .route("/v1/stats/drips-daily", get(stats::drips_daily))
         .route("/v1/stats/top-holders", get(stats::top_holders))
+        // chain#442 phase 3: cluster topology proxy.
+        .route("/v1/cluster/nodes", get(cluster::nodes))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state);

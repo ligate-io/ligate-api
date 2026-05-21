@@ -20,7 +20,9 @@
 //! - `GET /v1/ledger/slots/latest` — driver of the live-tail loop.
 //! - `GET /v1/ledger/slots/{height}` — driver of the backfill loop.
 
-use ligate_api_types::{LedgerBatch, LedgerEvent, LedgerTx, RollupInfo, SlotResponse};
+use ligate_api_types::{
+    ChainClusterTopology, LedgerBatch, LedgerEvent, LedgerTx, RollupInfo, SlotResponse,
+};
 use reqwest::Client as Http;
 use url::Url;
 
@@ -64,6 +66,43 @@ impl NodeClient {
         serde_json::from_slice::<RollupInfo>(&bytes).map_err(|source| IndexerError::NodeBadShape {
             url: url.to_string(),
             source,
+        })
+    }
+
+    /// `GET /v1/cluster/nodes`. Returns the DbElected cluster topology
+    /// (live leader + heartbeating replicas) from the chain side.
+    ///
+    /// The chain endpoint is blocked at Caddy publicly. When called
+    /// from the api with the right `Bearer` token, Caddy's auth gate
+    /// proxies through to the chain; without the token, callers get
+    /// 404 from the public RPC. Pass `auth_token = None` for the
+    /// (currently dev-only) path of hitting the chain directly inside
+    /// the VPC.
+    ///
+    /// Tracks chain#442.
+    pub async fn cluster_nodes(&self, auth_token: Option<&str>) -> Result<ChainClusterTopology> {
+        let url = self.url("v1/cluster/nodes");
+        let mut req = self.http.get(url.clone());
+        if let Some(token) = auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.map_err(IndexerError::NodeUnreachable)?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(IndexerError::NodeUnreachable)?;
+        if !status.is_success() {
+            return Err(IndexerError::NodeBadShape {
+                url: url.to_string(),
+                source: serde_json::Error::custom(format!(
+                    "chain returned HTTP {status} for /v1/cluster/nodes \
+                     (check CHAIN_CLUSTER_AUTH_TOKEN env var and Caddy auth gate)"
+                )),
+            });
+        }
+        serde_json::from_slice::<ChainClusterTopology>(&bytes).map_err(|source| {
+            IndexerError::NodeBadShape {
+                url: url.to_string(),
+                source,
+            }
         })
     }
 

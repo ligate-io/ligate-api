@@ -57,6 +57,109 @@ pub struct SyncStatus {
 }
 
 // ============================================================================
+// Cluster topology (`/v1/cluster/nodes`)
+// ============================================================================
+//
+// Two shapes:
+//
+//  - `ChainClusterTopology` / `ChainClusterNode` mirror the
+//    chain's `/v1/cluster/nodes` shape. They include the per-node
+//    VPC address; the api uses them to deserialize the chain
+//    response before transforming into the public shape.
+//  - `ClusterTopology` / `ClusterNode` are the public shape exposed
+//    by `api.ligate.io/v1/cluster/nodes`. Private addresses are
+//    stripped. `cluster_health` aggregates the topology into a
+//    single string monitoring tools can branch on.
+
+/// Public-facing topology response from `api.ligate.io/v1/cluster/nodes`.
+/// Addresses are stripped; consumers see only node ids, roles, and
+/// heartbeat ages. The leader's `acquired_at` is exposed so explorers
+/// can render "leader since X minutes ago".
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ClusterTopology {
+    /// Every node in the cluster, ordered leader-first then
+    /// alphabetically. Replicas with stale heartbeats are NOT
+    /// filtered out; consumers branch on `last_heartbeat_age_ms`.
+    pub nodes: Vec<ClusterNode>,
+    /// Node id of the current leader, or `None` during a failover
+    /// window when no node holds the lock. Should clear within
+    /// the cluster's `leader_timeout_millis` (default 500 ms).
+    pub leader_node_id: Option<String>,
+    /// Unix epoch milliseconds when the current leader first acquired
+    /// the lock. `None` if no leader is held.
+    pub leader_acquired_at_epoch_ms: Option<i64>,
+    /// Unix epoch milliseconds when the api fetched this snapshot
+    /// from the chain. Coupled with `Cache-Control` (default 5s) on
+    /// the response so clients can detect they're seeing cached data.
+    pub generated_at_epoch_ms: i64,
+    /// One-word aggregate. `healthy` if a leader exists and every
+    /// node's heartbeat is fresh; `degraded` if a leader exists but
+    /// some node is stale; `leaderless` if no leader is held right
+    /// now; `unknown` if the api couldn't reach the chain.
+    pub cluster_health: ClusterHealth,
+}
+
+/// One node in the public topology response. Mirror of
+/// `ChainClusterNode` without the private `address`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ClusterNode {
+    /// Stable per-VM identifier (e.g. `ligate-devnet-1-sequencer-2`).
+    pub node_id: String,
+    /// `true` exactly for the node holding the Postgres leader lock.
+    pub is_leader: bool,
+    /// Milliseconds since this node's last heartbeat. Fresh nodes
+    /// sit at <100 ms (the cluster's heartbeat interval); values
+    /// approaching `leader_timeout_millis` indicate trouble.
+    pub last_heartbeat_age_ms: i64,
+}
+
+/// Cluster health aggregate. See [`ClusterTopology::cluster_health`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClusterHealth {
+    /// Leader exists and every node heartbeat is fresh.
+    Healthy,
+    /// Leader exists but at least one node is heartbeat-stale.
+    Degraded,
+    /// No node holds the leader lock right now. Failover in progress
+    /// or election deadlock; should clear within ~12 seconds in a
+    /// healthy DbElected cluster.
+    Leaderless,
+    /// The api couldn't reach the chain endpoint to fetch a topology.
+    Unknown,
+}
+
+/// Internal shape used by the api to deserialize the chain's
+/// response. Mirrors the chain's `ClusterTopology` exactly,
+/// including the private `address` field. Never exposed publicly.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ChainClusterTopology {
+    /// Nodes in chain order (leader first, then alphabetical).
+    pub nodes: Vec<ChainClusterNode>,
+    /// Current leader's node id, or `None`.
+    pub leader_node_id: Option<String>,
+    /// Unix epoch milliseconds for the leader's `acquired_at`.
+    pub leader_acquired_at_epoch_ms: Option<i64>,
+    /// Snapshot time on the chain side.
+    pub generated_at_epoch_ms: i64,
+}
+
+/// Internal node shape. Mirrors the chain's `ClusterNode`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ChainClusterNode {
+    /// Stable per-VM identifier.
+    pub node_id: String,
+    /// Private VPC address (`host:port`). Stripped before the api
+    /// returns the response publicly; kept here only so the api
+    /// can deserialize the chain's response cleanly.
+    pub address: String,
+    /// `true` exactly for the node holding the Postgres leader lock.
+    pub is_leader: bool,
+    /// Heartbeat age in milliseconds.
+    pub last_heartbeat_age_ms: i64,
+}
+
+// ============================================================================
 // Attestation custom routes (`/v1/modules/attestation/...`)
 // ============================================================================
 
