@@ -1247,6 +1247,103 @@ pub async fn attestor_sets_list(
     )
 }
 
+/// `GET /v1/attestor-sets/by-member/{pubkey}` — paginated list of
+/// attestor sets whose `members` array contains the given bech32m
+/// `lpk1...` pubkey. Same `Page<AttestorSetResponse>` envelope,
+/// `(registered_at_slot, id)` cursor, and TTL as `/v1/attestor-sets`,
+/// so dashboard clients can reuse the same pagination plumbing.
+///
+/// Empty list is a 200, not a 404 — the absence of memberships is a
+/// valid answer ("you're not in any sets yet"), not a missing
+/// resource. 400 on a malformed pubkey path param.
+///
+/// Powers the themisra-dashboard Settings panel's "you're a member
+/// of N sets" view (closes audit gap #4 from
+/// `ligate-io/themisra-dashboard#34`).
+pub async fn attestor_sets_by_member(
+    State(state): State<AppState>,
+    Path(pubkey): Path<String>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
+    // Validate bech32m HRP `lpk` + 32-byte payload inline. Inlined
+    // rather than factored into a helper because returning the heavy
+    // `Response` type out of a small function trips
+    // `clippy::result_large_err`; the early-return pattern matches
+    // what `attestation_by_id` does for its `lat1...` validation.
+    let pubkey = pubkey.trim().to_lowercase();
+    match bech32::decode(&pubkey) {
+        Ok((hrp, data)) if hrp.as_str() == "lpk" && data.len() == 32 => {}
+        Ok((hrp, data)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_pubkey",
+                    "detail": format!(
+                        "expected bech32m HRP `lpk` with 32-byte payload, got HRP `{}` with {}-byte payload",
+                        hrp.as_str(),
+                        data.len(),
+                    ),
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_pubkey",
+                    "detail": format!("bech32m decode failed: {e}"),
+                })),
+            )
+                .into_response();
+        }
+    }
+    let limit = cursor::resolve_limit(params.limit);
+    let before = params
+        .before
+        .as_deref()
+        .and_then(cursor::decode::<AttestorSetsCursor>)
+        .map(|c| queries::AttestorSetsCursor {
+            registered_at_slot: c.slot as i64,
+            id: c.id,
+        });
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows =
+        match queries::attestor_sets_for_member_page(&state.pg, &pubkey, before, limit_plus_one)
+            .await
+        {
+            Ok(rs) => rs,
+            Err(e) => {
+                tracing::error!(error = %e, %pubkey, "attestor_sets_for_member_page");
+                return internal_error();
+            }
+        };
+    let has_more = rows.len() as i64 > limit as i64;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+    let next = if has_more {
+        rows.last().and_then(|r| {
+            cursor::encode(&AttestorSetsCursor {
+                slot: r.registered_at_slot as u64,
+                id: r.id.clone(),
+            })
+            .ok()
+        })
+    } else {
+        None
+    };
+    let data: Vec<AttestorSetResponse> =
+        rows.into_iter().map(attestor_set_row_to_response).collect();
+    cached(
+        Json(Page {
+            data,
+            pagination: Pagination { next, limit },
+        }),
+        TTL_SLOW_SECS,
+    )
+}
+
 fn attestor_set_row_to_response(row: queries::AttestorSetRow) -> AttestorSetResponse {
     let members: Vec<String> = match row.members {
         serde_json::Value::Array(arr) => arr

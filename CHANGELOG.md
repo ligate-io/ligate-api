@@ -8,6 +8,7 @@ Format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). I
 
 ### Added
 
+- `GET /v1/attestor-sets/by-member/{pubkey}` — paginated list of attestor sets whose `members` JSONB array contains the given bech32m `lpk1...` pubkey. Same `Page<AttestorSetResponse>` envelope and `(registered_at_slot, id)` cursor as `/v1/attestor-sets`, so dashboard clients reuse the existing pagination plumbing. Uses the GIN index on `attestor_sets.members` (already present from the original indexer migration) via the JSONB `@>` operator, so the WHERE is an index seek not a full table scan. `schema_count` is read from the denormalised column the indexer already maintains, not recomputed via a per-row LEFT JOIN. Path-param `pubkey` is bech32m-validated (HRP `lpk` + 32-byte payload); typos return 400 `invalid_pubkey` instead of an opaque empty 200. Empty memberships return 200 with `data: []` (absence is a valid answer, not a missing resource). Powers the themisra-dashboard Settings panel's "you're a member of N sets" view (closes audit gap #4 from `ligate-io/themisra-dashboard#34`).
 - Three activity-leaderboard endpoints under `/v1/stats/`:
   - `GET /top-attesters?n=10` — addresses ranked by attestation submissions (`attestations.submitter`). All-time count.
   - `GET /top-schema-owners?n=10` — addresses ranked by schemas registered (`schemas.owner`). All-time count.

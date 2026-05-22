@@ -47,6 +47,12 @@ chrono.workspace = true
 # Hex (for token id parsing during boot)
 hex.workspace = true
 
+# Bech32m. Used by handler-side input validation for `lpk1...` pubkey
+# path params on `/v1/attestor-sets/by-member/{pubkey}` so typos
+# return 400 instead of an opaque empty 200. Same crate the indexer
+# uses to derive `AttestationId`; shared workspace pin.
+bech32.workspace = true
+
 # Base64url codec for opaque list-endpoint cursors (RFC 0001 pagination).
 base64.workspace = true
 

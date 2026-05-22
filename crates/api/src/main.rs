@@ -249,6 +249,13 @@ async fn main() -> Result<()> {
         .route("/v1/schemas", get(handlers::schemas_list))
         .route("/v1/schemas/{id}", get(handlers::schema_by_id))
         .route("/v1/attestor-sets", get(handlers::attestor_sets_list))
+        // `/by-member/{pubkey}` registered before the `{id}` route. axum
+        // disambiguates by segment count (two segments vs one), so order
+        // is for human readability, not correctness.
+        .route(
+            "/v1/attestor-sets/by-member/{pubkey}",
+            get(handlers::attestor_sets_by_member),
+        )
         .route("/v1/attestor-sets/{id}", get(handlers::attestor_set_by_id))
         .route(
             "/v1/attestor-sets/{id}/attestations",
