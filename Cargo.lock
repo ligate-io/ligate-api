@@ -3951,6 +3951,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "bech32",
  "chrono",
  "dashmap 6.1.0",
  "hex",

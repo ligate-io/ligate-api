@@ -43,6 +43,7 @@ GET  /v1/schemas/{id}/attestations           → attestations for one schema
 
 # Attestor sets
 GET  /v1/attestor-sets                       → list of registered attestor sets
+GET  /v1/attestor-sets/by-member/{pubkey}    → attestor sets that include this `lpk1...` member
 GET  /v1/attestor-sets/{id}                  → attestor-set detail
 GET  /v1/attestor-sets/{id}/attestations     → attestations for one attestor set
 

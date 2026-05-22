@@ -992,6 +992,77 @@ pub struct AttestorSetsCursor {
     pub id: String,
 }
 
+/// Read a page of attestor sets whose `members` JSONB array contains
+/// `pubkey` (bech32m `lpk1...`). Same `(registered_at_slot, id)` DESC
+/// ordering and cursor shape as [`attestor_sets_page`], so the wire
+/// envelope is identical and the handler can reuse the same encode/
+/// decode + truncation logic.
+///
+/// Containment is checked with the JSONB `@>` operator against a
+/// single-element array — Postgres uses the GIN index on
+/// `attestor_sets.members` (migration
+/// `20260509000001_indexer_query_tables.sql:174-176`) so the WHERE
+/// is an index seek, not a full table scan.
+pub async fn attestor_sets_for_member_page(
+    pool: &PgPool,
+    pubkey: &str,
+    before: Option<AttestorSetsCursor>,
+    limit_plus_one: i64,
+) -> sqlx::Result<Vec<AttestorSetRow>> {
+    // `members @> [pubkey]` is the JSONB containment query the GIN
+    // index serves. Bind via serde_json::Value so sqlx encodes it
+    // as JSONB, not text.
+    let member_filter = serde_json::json!([pubkey]);
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(String, Value, i32, i64, String, DateTime<Utc>, i32)> = match before {
+        Some(c) => {
+            sqlx::query_as(
+                "SELECT id, members, threshold,
+                        registered_at_slot, registered_at_tx, registered_at_timestamp,
+                        schema_count
+                 FROM attestor_sets
+                 WHERE members @> $1
+                   AND (registered_at_slot, id) < ($2, $3)
+                 ORDER BY registered_at_slot DESC, id DESC
+                 LIMIT $4",
+            )
+            .bind(&member_filter)
+            .bind(c.registered_at_slot)
+            .bind(&c.id)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                "SELECT id, members, threshold,
+                        registered_at_slot, registered_at_tx, registered_at_timestamp,
+                        schema_count
+                 FROM attestor_sets
+                 WHERE members @> $1
+                 ORDER BY registered_at_slot DESC, id DESC
+                 LIMIT $2",
+            )
+            .bind(&member_filter)
+            .bind(limit_plus_one)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+    Ok(rows
+        .into_iter()
+        .map(|t| AttestorSetRow {
+            id: t.0,
+            members: t.1,
+            threshold: t.2,
+            registered_at_slot: t.3,
+            registered_at_tx: t.4,
+            registered_at_timestamp: t.5,
+            schema_count: t.6,
+        })
+        .collect())
+}
+
 /// Read a page of attestor sets, descending by
 /// `(registered_at_slot, id)`. Companion to the existing
 /// [`attestor_set_by_id`] for the per-id case.
