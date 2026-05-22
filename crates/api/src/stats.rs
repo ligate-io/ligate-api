@@ -13,6 +13,9 @@
 //! | `GET /new-wallets-daily?days=7` | Timeseries of new addresses (`address_summaries.first_seen_timestamp`) bucketed by UTC day. |
 //! | `GET /tx-rate-daily?days=7` | Timeseries of tx counts bucketed by UTC day, broken down by `kind` (bank.transfer, register.schema, etc.) and `outcome`. |
 //! | `GET /top-holders?n=10` | Top N LGT holders by current balance, queried live from the chain's bank module (no balance index in the api yet; fine for devnet's ~10-address scale, replace with indexed column before mainnet). |
+//! | `GET /top-attesters?n=10` | Addresses ranked by attestation submissions (`attestations.submitter`). All-time count. |
+//! | `GET /top-schema-owners?n=10` | Addresses ranked by schemas registered (`schemas.owner`). All-time count. |
+//! | `GET /top-attestor-sets?n=10` | Attestor sets (`las1...`) ranked by `attestor_sets.schema_count` (denormalised counter maintained by ingest). |
 //!
 //! ## Caching
 //!
@@ -1173,4 +1176,205 @@ mod tests {
         assert!(parse_interval("h").is_err()); // no number
         assert!(parse_interval("5y").is_err()); // unknown unit
     }
+}
+
+// ============================================================================
+// Activity leaderboards (top attesters, top schema owners, top attestor sets)
+//
+// Three endpoints under `/v1/stats/` that surface "who's using the chain
+// most" for Grafana panels + future explorer leaderboard pages. All three
+// share a small `TopAddressRank` shape so Grafana can render them as a
+// single table-panel template per leaderboard.
+//
+// Why this lives in the api, not in chain Prometheus: Prometheus is bad
+// at high-cardinality labels (every address becomes a label value =
+// unbounded series). Grafana points at the api directly via the Infinity
+// HTTP-JSON datasource for the table view.
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct LeaderboardQuery {
+    /// Number of rows to return. Default 10, capped at 100 to keep the
+    /// row scan + JSON envelope cheap. Grafana panels typically render
+    /// 10 to 25; analysts can pull 100 via direct curl.
+    #[serde(default)]
+    n: Option<u32>,
+}
+
+/// One row in a leaderboard response. `address` is the leaderboard key
+/// (a submitter / owner / set id depending on the endpoint). `count`
+/// is whatever the endpoint counts (attestations, schemas, ...) — its
+/// semantic is documented per endpoint, not per row, so the shape stays
+/// uniform across leaderboards.
+#[derive(Serialize)]
+struct TopAddressRank {
+    rank: u32,
+    address: String,
+    count: i64,
+}
+
+#[derive(Serialize)]
+struct LeaderboardResponse {
+    /// Window the leaderboard covers. Today all three leaderboards are
+    /// `"all-time"` because the indexer doesn't bucket events by time
+    /// at the address level. A future variant could pass `?since=24h`
+    /// and switch to a SUM over `transactions.indexed_at`; the response
+    /// shape stays the same.
+    window: String,
+    rows: Vec<TopAddressRank>,
+}
+
+/// `GET /v1/stats/top-attesters?n=10` — addresses ranked by total number
+/// of attestations submitted. Counts `attestations.submitter`. Identifier
+/// is a bech32m `lig1...` (28-byte rollup address).
+pub async fn top_attesters(
+    State(state): State<AppState>,
+    Query(params): Query<LeaderboardQuery>,
+) -> Response {
+    let n = params.n.unwrap_or(10).min(100);
+    let key = format!("top-attesters:{n}");
+    if let Some(cached) = state.stats_cache.get_fresh(&key, DEFAULT_TTL) {
+        return cached_json_response(cached, TTL_STATS_DEFAULT_SECS);
+    }
+    match compute_top_attesters(&state.pg, n).await {
+        Ok(payload) => match serde_json::to_string(&payload) {
+            Ok(body) => {
+                state.stats_cache.put(key, body.clone());
+                cached_json_response(body, TTL_STATS_DEFAULT_SECS)
+            }
+            Err(e) => error_response(e.into()),
+        },
+        Err(e) => error_response(e),
+    }
+}
+
+async fn compute_top_attesters(pool: &PgPool, n: u32) -> anyhow::Result<LeaderboardResponse> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT submitter, COUNT(*)::BIGINT \
+         FROM attestations \
+         GROUP BY submitter \
+         ORDER BY COUNT(*) DESC, submitter ASC \
+         LIMIT $1",
+    )
+    .bind(n as i64)
+    .fetch_all(pool)
+    .await
+    .context("top-attesters query")?;
+    Ok(LeaderboardResponse {
+        window: "all-time".to_string(),
+        rows: rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, (address, count))| TopAddressRank {
+                rank: (i as u32) + 1,
+                address,
+                count,
+            })
+            .collect(),
+    })
+}
+
+/// `GET /v1/stats/top-schema-owners?n=10` — addresses ranked by total
+/// number of schemas registered (`schemas.owner`). Same `lig1...`
+/// address universe as top-attesters; an address may appear in both
+/// leaderboards with different counts.
+pub async fn top_schema_owners(
+    State(state): State<AppState>,
+    Query(params): Query<LeaderboardQuery>,
+) -> Response {
+    let n = params.n.unwrap_or(10).min(100);
+    let key = format!("top-schema-owners:{n}");
+    if let Some(cached) = state.stats_cache.get_fresh(&key, DEFAULT_TTL) {
+        return cached_json_response(cached, TTL_STATS_DEFAULT_SECS);
+    }
+    match compute_top_schema_owners(&state.pg, n).await {
+        Ok(payload) => match serde_json::to_string(&payload) {
+            Ok(body) => {
+                state.stats_cache.put(key, body.clone());
+                cached_json_response(body, TTL_STATS_DEFAULT_SECS)
+            }
+            Err(e) => error_response(e.into()),
+        },
+        Err(e) => error_response(e),
+    }
+}
+
+async fn compute_top_schema_owners(pool: &PgPool, n: u32) -> anyhow::Result<LeaderboardResponse> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT owner, COUNT(*)::BIGINT \
+         FROM schemas \
+         GROUP BY owner \
+         ORDER BY COUNT(*) DESC, owner ASC \
+         LIMIT $1",
+    )
+    .bind(n as i64)
+    .fetch_all(pool)
+    .await
+    .context("top-schema-owners query")?;
+    Ok(LeaderboardResponse {
+        window: "all-time".to_string(),
+        rows: rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, (address, count))| TopAddressRank {
+                rank: (i as u32) + 1,
+                address,
+                count,
+            })
+            .collect(),
+    })
+}
+
+/// `GET /v1/stats/top-attestor-sets?n=10` — attestor sets ranked by
+/// number of schemas bound to them. Uses the denormalised
+/// `attestor_sets.schema_count` column (kept up to date by ingest),
+/// so the query is a single index scan, not a GROUP BY over schemas.
+/// Identifier here is a `las1...` (the attestor-set id), not an
+/// address — same response shape, different identifier space. Clients
+/// route to `/v1/attestor-sets/{id}` for detail.
+pub async fn top_attestor_sets(
+    State(state): State<AppState>,
+    Query(params): Query<LeaderboardQuery>,
+) -> Response {
+    let n = params.n.unwrap_or(10).min(100);
+    let key = format!("top-attestor-sets:{n}");
+    if let Some(cached) = state.stats_cache.get_fresh(&key, DEFAULT_TTL) {
+        return cached_json_response(cached, TTL_STATS_DEFAULT_SECS);
+    }
+    match compute_top_attestor_sets(&state.pg, n).await {
+        Ok(payload) => match serde_json::to_string(&payload) {
+            Ok(body) => {
+                state.stats_cache.put(key, body.clone());
+                cached_json_response(body, TTL_STATS_DEFAULT_SECS)
+            }
+            Err(e) => error_response(e.into()),
+        },
+        Err(e) => error_response(e),
+    }
+}
+
+async fn compute_top_attestor_sets(pool: &PgPool, n: u32) -> anyhow::Result<LeaderboardResponse> {
+    let rows: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT id, schema_count \
+         FROM attestor_sets \
+         WHERE schema_count > 0 \
+         ORDER BY schema_count DESC, id ASC \
+         LIMIT $1",
+    )
+    .bind(n as i64)
+    .fetch_all(pool)
+    .await
+    .context("top-attestor-sets query")?;
+    Ok(LeaderboardResponse {
+        window: "all-time".to_string(),
+        rows: rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, (address, count))| TopAddressRank {
+                rank: (i as u32) + 1,
+                address,
+                count: count as i64,
+            })
+            .collect(),
+    })
 }

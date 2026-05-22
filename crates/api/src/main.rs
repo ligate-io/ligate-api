@@ -275,6 +275,11 @@ async fn main() -> Result<()> {
         )
         .route("/v1/stats/drips-daily", get(stats::drips_daily))
         .route("/v1/stats/top-holders", get(stats::top_holders))
+        // Activity leaderboards (api#XX): "who's using the chain most".
+        // Each one is a small GROUP BY against the indexer query tables.
+        .route("/v1/stats/top-attesters", get(stats::top_attesters))
+        .route("/v1/stats/top-schema-owners", get(stats::top_schema_owners))
+        .route("/v1/stats/top-attestor-sets", get(stats::top_attestor_sets))
         // chain#442 phase 3: cluster topology proxy.
         .route("/v1/cluster/nodes", get(cluster::nodes))
         .layer(TraceLayer::new_for_http())
