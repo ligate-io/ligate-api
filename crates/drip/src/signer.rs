@@ -1,6 +1,6 @@
 //! Hot-key signer for ligate-faucet.
 //!
-//! Signs and submits a `bank.transfer` to drip `$LGT` to the
+//! Signs and submits a `bank.transfer` to drip `AVOW` to the
 //! requested address. Uses [`ligate_client::submit::Submitter`] for
 //! chain interaction.
 //!
@@ -54,10 +54,10 @@ type ChainRuntime = ligate_stf::runtime::Runtime<S>;
 type SovPrivateKey = <<S as Spec>::CryptoSpec as CryptoSpec>::PrivateKey;
 type SovAddress = <S as Spec>::Address;
 
-/// Default per-tx fee envelope (in nano-LGT). Generous so a faucet
+/// Default per-tx fee envelope (in nano-AVOW). Generous so a faucet
 /// drip never fails for fee reasons even if the chain's per-tx gas
 /// burn drifts up. Operators can tune via env if needed.
-const DEFAULT_MAX_FEE_NANO: u128 = 100_000_000; // 0.1 $LGT
+const DEFAULT_MAX_FEE_NANO: u128 = 100_000_000; // 0.1 AVOW
 
 #[derive(Debug, Error)]
 pub enum SignerError {
@@ -77,7 +77,7 @@ pub struct DripReceipt {
     /// always in the chain's canonical Display form for whichever
     /// chain rev the faucet is pointed at.
     pub tx_hash: String,
-    /// Drip amount in nano-LGT.
+    /// Drip amount in nano-AVOW.
     pub amount_nano: u128,
 }
 
@@ -89,7 +89,7 @@ pub struct Signer {
     chain_rpc_with_v1: String,
     chain_hash: [u8; 32],
     chain_id: u64,
-    lgt_token_id: TokenId,
+    avow_token_id: TokenId,
     /// Local-counter nonce. Initialised from chain at startup, then
     /// monotonically incremented per drip. If the faucet restarts,
     /// re-fetch from chain (operator-side concern, not a signer
@@ -114,7 +114,7 @@ impl Signer {
         chain_rpc: String,
         chain_id: u64,
         chain_hash: [u8; 32],
-        lgt_token_id: TokenId,
+        avow_token_id: TokenId,
         starting_nonce: u64,
     ) -> Result<Self, SignerError> {
         if signing_key_hex.len() != 64 {
@@ -146,7 +146,7 @@ impl Signer {
             chain_rpc_with_v1,
             chain_hash,
             chain_id,
-            lgt_token_id,
+            avow_token_id,
             nonce: AtomicU64::new(starting_nonce),
         })
     }
@@ -170,7 +170,7 @@ impl Signer {
         chain_rpc: String,
         chain_id: u64,
         chain_hash: [u8; 32],
-        lgt_token_id: TokenId,
+        avow_token_id: TokenId,
         starting_nonce_override: Option<u64>,
     ) -> Result<(Self, u64), anyhow::Error> {
         let signer = Self::new(
@@ -178,7 +178,7 @@ impl Signer {
             chain_rpc,
             chain_id,
             chain_hash,
-            lgt_token_id,
+            avow_token_id,
             0,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -204,20 +204,20 @@ impl Signer {
         SovAddress::from(credential_id).to_string()
     }
 
-    /// Query the chain for the faucet's own LGT balance (nano-LGT).
+    /// Query the chain for the faucet's own AVOW balance (nano-AVOW).
     ///
     /// Used by the startup drip-budget sanity check
     /// (`FAUCET_MIN_DRIPS_BUDGET` in main.rs). Goes through the SDK's
     /// `get_balance_for_holder` so the URL shape stays in lockstep
     /// with what the rest of the chain client uses.
     ///
-    /// Returns the balance as raw `u128` (nano-LGT), so the caller
+    /// Returns the balance as raw `u128` (nano-AVOW), so the caller
     /// can divide by drip amount without an `Amount`-newtype roundtrip.
     pub async fn query_self_balance(&self) -> Result<u128, anyhow::Error> {
         self.query_balance_for(&self.address()).await
     }
 
-    /// Query the LGT balance of an arbitrary `lig1...` address via
+    /// Query the AVOW balance of an arbitrary `lig1...` address via
     /// the chain's bank module. Used by the api's
     /// `/v1/addresses/{addr}` handler to surface a live gas-token
     /// balance alongside the indexer's denormalised counters.
@@ -226,14 +226,14 @@ impl Signer {
         let amount = self
             .submitter
             .inner()
-            .get_balance_for_holder::<S>(address, &self.lgt_token_id)
+            .get_balance_for_holder::<S>(address, &self.avow_token_id)
             .await
-            .with_context(|| format!("querying LGT balance for {address}"))?;
+            .with_context(|| format!("querying AVOW balance for {address}"))?;
         Ok(amount.0)
     }
 
     /// Query the chain for the configured gas-token's total supply
-    /// (nano-LGT).
+    /// (nano-AVOW).
     ///
     /// Hits `GET /v1/modules/bank/tokens/{token_id}/total-supply` on
     /// the chain RPC directly. The SDK's `NodeClient` doesn't expose
@@ -253,7 +253,7 @@ impl Signer {
         // hex. Passing hex trips the bech32 checksum validation and
         // returns 400 ("Bech32 error: invalid checksum"). Use the
         // already-cached bech32m form on `Signer`.
-        let token_id = self.lgt_token_id.to_bech32().to_string();
+        let token_id = self.avow_token_id.to_bech32().to_string();
         let path = format!("/modules/bank/tokens/{token_id}/total-supply");
         let body = self
             .submitter
@@ -280,8 +280,8 @@ impl Signer {
     /// the chain emits on REST. Used by the api's address-summary
     /// handler to surface `balances[].token_id` in the canonical
     /// form partners reach for elsewhere.
-    pub fn lgt_token_id_bech32(&self) -> String {
-        self.lgt_token_id.to_bech32().to_string()
+    pub fn avow_token_id_bech32(&self) -> String {
+        self.avow_token_id.to_bech32().to_string()
     }
 
     /// Sign and submit a `bank.transfer` of `amount_nano` from the
@@ -303,7 +303,7 @@ impl Signer {
             to,
             coins: Coins {
                 amount: Amount::from(amount_nano),
-                token_id: self.lgt_token_id,
+                token_id: self.avow_token_id,
             },
         });
 

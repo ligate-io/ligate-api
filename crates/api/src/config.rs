@@ -3,20 +3,20 @@
 use anyhow::{anyhow, Context, Result};
 
 const DEFAULT_BIND: &str = "0.0.0.0:8080";
-const DEFAULT_DRIP_AMOUNT: u128 = 100_000_000_000; // 100 LGT in nano-LGT
+const DEFAULT_DRIP_AMOUNT: u128 = 100_000_000_000; // 100 AVOW in nano-AVOW
 const DEFAULT_DRIP_RATE_LIMIT_SECS: u64 = 24 * 60 * 60; // 24h per address
 const DEFAULT_DRIP_MIN_BUDGET: u64 = 100;
 const DEFAULT_PG_POOL_SIZE: u32 = 10;
 
 // Discord faucet bot (`POST /v1/drip-bot`) defaults. Independent of the
-// web faucet's 100 LGT / 24h. Tier amounts in nano-LGT. The cooldown
+// web faucet's 100 AVOW / 24h. Tier amounts in nano-AVOW. The cooldown
 // applies INDEPENDENTLY to both the per-address and per-Discord-user
 // counters; both must clear for a drip to succeed.
 const DEFAULT_BOT_DRIP_RATE_LIMIT_SECS: u64 = 5 * 24 * 60 * 60; // 5 days
-const DEFAULT_BOT_DRIP_AMOUNT_NEWCOMER: u128 = 100_000_000_000; //  100 LGT (server tenure < 7d)
-const DEFAULT_BOT_DRIP_AMOUNT_REGULAR: u128 = 250_000_000_000; //  250 LGT (7-30d tenure)
-const DEFAULT_BOT_DRIP_AMOUNT_VETERAN: u128 = 500_000_000_000; //  500 LGT (30-90d tenure)
-const DEFAULT_BOT_DRIP_AMOUNT_ELDER: u128 = 1_000_000_000_000; // 1000 LGT (90d+ tenure)
+const DEFAULT_BOT_DRIP_AMOUNT_NEWCOMER: u128 = 100_000_000_000; //  100 AVOW (server tenure < 7d)
+const DEFAULT_BOT_DRIP_AMOUNT_REGULAR: u128 = 250_000_000_000; //  250 AVOW (7-30d tenure)
+const DEFAULT_BOT_DRIP_AMOUNT_VETERAN: u128 = 500_000_000_000; //  500 AVOW (30-90d tenure)
+const DEFAULT_BOT_DRIP_AMOUNT_ELDER: u128 = 1_000_000_000_000; // 1000 AVOW (90d+ tenure)
 
 /// All env-derived runtime config for `ligate-api`.
 #[derive(Debug, Clone)]
@@ -52,14 +52,14 @@ pub struct Config {
     /// for predictability; restart the api after a chain re-genesis.
     pub chain_hash: [u8; 32],
 
-    /// LGT token id, 64-char hex from `bank.json`'s `gas_token_config`.
-    pub lgt_token_id_hex: String,
+    /// AVOW token id, 64-char hex from `bank.json`'s `gas_token_config`.
+    pub avow_token_id_hex: String,
 
     /// Drip signer hot-key, 64-char hex (32-byte ed25519 private key).
     /// Held in process memory; never logged.
     pub drip_signer_key: String,
 
-    /// Per-drip amount in nano-LGT. Default `100_000_000_000` (100 LGT).
+    /// Per-drip amount in nano-AVOW. Default `100_000_000_000` (100 AVOW).
     pub drip_amount: u128,
 
     /// Per-address rate-limit cooldown. Default 24h.
@@ -92,7 +92,7 @@ pub struct Config {
     /// returns the rest of the response intact. Genesis pins the
     /// real treasury at `chain/devnet-1/genesis/bank.json`; partners
     /// running their own chain copy can leave this unset.
-    pub lgt_treasury_addr: Option<String>,
+    pub avow_treasury_addr: Option<String>,
 
     /// Shared secret for the Discord faucet bot (`POST /v1/drip-bot`).
     /// The bot sends this in the `X-Bot-Secret` header on every call.
@@ -112,7 +112,7 @@ pub struct Config {
     /// counter AND the per-Discord-user counter; both must clear.
     pub bot_drip_rate_limit_secs: u64,
 
-    /// Tiered drip amounts in nano-LGT, keyed by Discord server tenure.
+    /// Tiered drip amounts in nano-AVOW, keyed by Discord server tenure.
     /// Bot computes the tier from `member.joinedAt`; api re-validates
     /// the amount the bot claims matches the tier the bot also claims
     /// (so a compromised bot can't unilaterally over-drip).
@@ -162,8 +162,8 @@ impl Config {
         let mut chain_hash = [0u8; 32];
         chain_hash.copy_from_slice(&chain_hash_bytes);
 
-        let lgt_token_id_hex = std::env::var("LGT_TOKEN_ID")
-            .context("LGT_TOKEN_ID is required (64-char hex from bank.json)")?;
+        let avow_token_id_hex = std::env::var("AVOW_TOKEN_ID")
+            .context("AVOW_TOKEN_ID is required (64-char hex from bank.json)")?;
 
         let drip_signer_key = std::env::var("DRIP_SIGNER_KEY")
             .context("DRIP_SIGNER_KEY is required (64-char hex private key)")?;
@@ -193,7 +193,7 @@ impl Config {
             .transpose()
             .context("INDEXER_START_HEIGHT must be u64")?;
 
-        let lgt_treasury_addr = std::env::var("LGT_TREASURY_ADDR").ok();
+        let avow_treasury_addr = std::env::var("AVOW_TREASURY_ADDR").ok();
 
         // Discord faucet bot config (all optional; bot endpoint
         // disabled if FAUCET_BOT_SECRET is unset).
@@ -226,14 +226,14 @@ impl Config {
             chain_cluster_auth_token,
             chain_id,
             chain_hash,
-            lgt_token_id_hex,
+            avow_token_id_hex,
             drip_signer_key,
             drip_amount,
             drip_rate_limit_secs,
             drip_min_budget,
             drip_starting_nonce,
             indexer_start_height,
-            lgt_treasury_addr,
+            avow_treasury_addr,
             faucet_bot_secret,
             bot_drip_rate_limit_secs,
             bot_drip_amount_newcomer,

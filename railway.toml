@@ -15,9 +15,9 @@
 # - `CHAIN_RPC`              — `https://rpc.ligate.io` for production
 # - `CHAIN_ID`               — numeric, from chain_state.json
 # - `CHAIN_HASH`             — 64-char hex, from /v1/rollup/info
-# - `LGT_TOKEN_ID`           — 64-char hex, from bank.json
+# - `AVOW_TOKEN_ID`          — 64-char hex, from bank.json
 # - `DRIP_SIGNER_KEY`        — 64-char hex (Railway "Secret" type)
-# - `DRIP_AMOUNT`            — optional, default 100_000_000_000 (100 LGT)
+# - `DRIP_AMOUNT`            — optional, default 100_000_000_000 (100 AVOW)
 # - `DRIP_RATE_LIMIT_SECS`   — optional, default 86400 (24h)
 # - `DRIP_MIN_BUDGET`        — optional, default 100 (drips)
 

@@ -83,7 +83,7 @@ pub struct DripBotRequest {
     /// Tier the bot claims for the caller. The api validates that
     /// `amount_nano` matches the configured amount for this tier.
     pub tier: Tier,
-    /// Drip amount in nano-LGT. Must equal `tier_to_amount(tier)`.
+    /// Drip amount in nano-AVOW. Must equal `tier_to_amount(tier)`.
     pub amount_nano: u128,
     /// Raw tier inputs. Optional and analytics-only — the api does
     /// NOT recompute tier from these (the bot knows the live Discord
@@ -104,7 +104,7 @@ pub struct DripBotResponse {
     pub discord_user_id: String,
     pub tx_hash: String,
     pub amount_nano: u128,
-    pub amount_lgt: f64,
+    pub amount_avow: f64,
     pub tier: Tier,
     /// When this address can drip again via the bot endpoint.
     pub next_drip_available_at: String,
@@ -135,8 +135,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// `1e9` as a float; preserves precision for typical drip amounts
-/// (100-1000 LGT) without pulling in big-decimal math.
-fn nano_to_lgt(nano: u128) -> f64 {
+/// (100-1000 AVOW) without pulling in big-decimal math.
+fn nano_to_avow(nano: u128) -> f64 {
     (nano as f64) / 1e9
 }
 
@@ -364,7 +364,7 @@ pub async fn drip_bot(
         discord_user_id: req.discord_user_id,
         tx_hash: receipt.tx_hash,
         amount_nano: receipt.amount_nano,
-        amount_lgt: nano_to_lgt(receipt.amount_nano),
+        amount_avow: nano_to_avow(receipt.amount_nano),
         tier: req.tier,
         next_drip_available_at: next_at.to_rfc3339_opts(SecondsFormat::Millis, true),
     }))
@@ -396,9 +396,9 @@ mod tests {
     }
 
     #[test]
-    fn nano_to_lgt_precision() {
-        assert_eq!(nano_to_lgt(100_000_000_000), 100.0);
-        assert_eq!(nano_to_lgt(1_000_000_000_000), 1000.0);
-        assert_eq!(nano_to_lgt(0), 0.0);
+    fn nano_to_avow_precision() {
+        assert_eq!(nano_to_avow(100_000_000_000), 100.0);
+        assert_eq!(nano_to_avow(1_000_000_000_000), 1000.0);
+        assert_eq!(nano_to_avow(0), 0.0);
     }
 }

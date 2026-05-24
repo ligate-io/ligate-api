@@ -12,7 +12,7 @@
 //! | `GET /active-addresses?window=24h` | Unique addresses with at least one tx (sent or received) in the time window. |
 //! | `GET /new-wallets-daily?days=7` | Timeseries of new addresses (`address_summaries.first_seen_timestamp`) bucketed by UTC day. |
 //! | `GET /tx-rate-daily?days=7` | Timeseries of tx counts bucketed by UTC day, broken down by `kind` (bank.transfer, register.schema, etc.) and `outcome`. |
-//! | `GET /top-holders?n=10` | Top N LGT holders by current balance, queried live from the chain's bank module (no balance index in the api yet; fine for devnet's ~10-address scale, replace with indexed column before mainnet). |
+//! | `GET /top-holders?n=10` | Top N AVOW holders by current balance, queried live from the chain's bank module (no balance index in the api yet; fine for devnet's ~10-address scale, replace with indexed column before mainnet). |
 //! | `GET /top-attesters?n=10` | Addresses ranked by attestation submissions (`attestations.submitter`). All-time count. |
 //! | `GET /top-schema-owners?n=10` | Addresses ranked by schemas registered (`schemas.owner`). All-time count. |
 //! | `GET /top-attestor-sets?n=10` | Attestor sets (`las1...`) ranked by `attestor_sets.schema_count` (denormalised counter maintained by ingest). |
@@ -160,14 +160,14 @@ struct TotalsResponse {
     attestor_sets: i64,
     /// Submitted attestations (`SubmitAttestation` txs).
     attestations: i64,
-    /// Total LGT supply in nano-LGT (u128 as decimal string). Pulled
+    /// Total AVOW supply in nano-AVOW (u128 as decimal string). Pulled
     /// live from the chain's bank module at compute time; cached in
     /// the response for `DEFAULT_TTL`. `None` when chain RPC is
     /// unreachable.
     #[serde(skip_serializing_if = "Option::is_none")]
     total_supply_nano: Option<String>,
-    /// Treasury balance in nano-LGT (u128 as decimal string). `None`
-    /// when either chain RPC is unreachable OR `LGT_TREASURY_ADDR`
+    /// Treasury balance in nano-AVOW (u128 as decimal string). `None`
+    /// when either chain RPC is unreachable OR `AVOW_TREASURY_ADDR`
     /// is not configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     treasury_balance_nano: Option<String>,
@@ -247,7 +247,7 @@ async fn compute_totals(state: &AppState) -> anyhow::Result<TotalsResponse> {
             None
         }
     };
-    let (treasury_balance_nano, treasury_address) = match &state.config.lgt_treasury_addr {
+    let (treasury_balance_nano, treasury_address) = match &state.config.avow_treasury_addr {
         Some(addr) => match state.signer.query_balance_for(addr).await {
             Ok(n) => (Some(n.to_string()), Some(addr.clone())),
             Err(e) => {
@@ -924,7 +924,7 @@ struct TopHolder {
     /// String form to safely cross u128/JSON-number boundaries.
     balance_nano: String,
     /// `balance_nano / 1e9` rendered as f64; lossy beyond ~2^53 nano.
-    balance_lgt: f64,
+    balance_avow: f64,
 }
 
 #[derive(Serialize)]
@@ -988,7 +988,7 @@ async fn compute_top_holders(state: &AppState, n: u32) -> anyhow::Result<TopHold
             rank: (i as u32) + 1,
             address,
             balance_nano: balance_nano.to_string(),
-            balance_lgt: (balance_nano as f64) / 1_000_000_000.0,
+            balance_avow: (balance_nano as f64) / 1_000_000_000.0,
         })
         .collect();
     Ok(TopHoldersResponse {

@@ -379,7 +379,7 @@ pub async fn insert_transaction(
     // (`gas_used = [0, 0]` on every batch receipt observed, even
     // though `gas_price` is non-zero at `[7, 7]`). So the actual
     // billed gas fee per tx is 0 — write that explicitly instead of
-    // NULL so the explorer can distinguish "0 LGT (real)" from
+    // NULL so the explorer can distinguish "0 AVOW (real)" from
     // "unknown (not yet exposed)". On testnet+ when gas pricing
     // actually charges, the indexer should extract from the receipt;
     // tracked as a follow-up in ligate-api#48 Tier 3.1.

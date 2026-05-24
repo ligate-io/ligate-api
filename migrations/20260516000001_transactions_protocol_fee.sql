@@ -15,9 +15,9 @@
 --                                    Charged regardless of `gas_price`.
 --                                    For attestation calls on ligate-devnet-1
 --                                    (`chain/devnet-1/genesis/attestation.json`):
---                                      register_attestor_set  = 50_000_000  nano (0.05  LGT)
---                                      register_schema        = 100_000_000 nano (0.10  LGT)
---                                      submit_attestation     = 100_000     nano (0.0001 LGT)
+--                                      register_attestor_set  = 50_000_000  nano (0.05  AVOW)
+--                                      register_schema        = 100_000_000 nano (0.10  AVOW)
+--                                      submit_attestation     = 100_000     nano (0.0001 AVOW)
 --                                    Routes to treasury (default) or to a
 --                                    builder share per schema config.
 --                                    Note: these are devnet values; testnet/mainnet
@@ -27,7 +27,7 @@
 --
 -- Until this column existed, the api's `/v1/txs/{hash}` and
 -- `/v1/stats/totals` reported `fee_paid_nano: "0"` for an attestation
--- tx that actually cost its submitter 100 LGT in protocol fees,
+-- tx that actually cost its submitter 100 AVOW in protocol fees,
 -- silently mis-representing tx cost. The indexer's parser extracts
 -- this from the Bank/TokenTransferred event(s) the chain emits
 -- alongside the attestation event (the fee transfer is a separate
@@ -50,9 +50,9 @@ ALTER TABLE transactions
 -- `chain/devnet-1/genesis/attestation.json`), seed the column so
 -- the explorer renders historically accurate values without a
 -- re-ingest. Values:
---   register_attestor_set:    50_000_000      (0.05 LGT, 9 decimals)
---   register_schema:         100_000_000      (0.10 LGT)
---   submit_attestation:          100_000      (0.0001 LGT)
+--   register_attestor_set:    50_000_000      (0.05 AVOW, 9 decimals)
+--   register_schema:         100_000_000      (0.10 AVOW)
+--   submit_attestation:          100_000      (0.0001 AVOW)
 --   transfer:                          0      (no protocol fee)
 --
 -- For kinds that vary by config at runtime (schema's

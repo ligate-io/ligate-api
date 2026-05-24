@@ -26,7 +26,7 @@ different information:
 
 - "Can this address drip right now?" (green CTA vs grey)
 - "When can it drip again?" (countdown)
-- "How much will it get?" (display "you'll receive 1 LGT")
+- "How much will it get?" (display "you'll receive 1 AVOW")
 - "Is the faucet drained?" (helpful error vs cryptic 502)
 
 Today, the frontend would call `POST /v1/drip` and discover ineligibility
@@ -43,10 +43,10 @@ button is correctly enabled or disabled before the user clicks.
 ```jsonc
 {
   "drip_amount_nano": "1000000000",       // u128 string per RFC 0002
-  "drip_amount_lgt": 1.0,                 // f64 convenience field
+  "drip_amount_avow": 1.0,                 // f64 convenience field
   "rate_limit_secs": 86400,
   "min_budget_nano": "100000000000",      // operator early-warning threshold
-  "current_budget_nano": "999000000000",  // faucet's $LGT balance, fresh per request
+  "current_budget_nano": "999000000000",  // faucet's AVOW balance, fresh per request
   "faucet_address": "lig1...",
   "addresses_dripped_total": 1234,        // since process start (in-memory counter)
   "drained": false                        // current_budget_nano < drip_amount_nano
@@ -55,7 +55,7 @@ button is correctly enabled or disabled before the user clicks.
 
 Changes from current shape:
 - Adds `current_budget_nano` (refreshed every call from
-  `getBalance(faucet_address, lgt_token)`).
+  `getBalance(faucet_address, avow_token)`).
 - Adds `drained` boolean for at-a-glance ops alerting.
 - Renames `addresses_dripped` to `addresses_dripped_total` for clarity.
 - u128 amounts as decimal strings per [RFC 0002](./0002-response-shapes.md).
@@ -67,7 +67,7 @@ Changes from current shape:
   "address": "lig1...",
   "eligible": true,                       // computed: not rate-limited AND not drained
   "drip_amount_nano": "1000000000",
-  "drip_amount_lgt": 1.0,
+  "drip_amount_avow": 1.0,
   "next_drip_at": null,                   // RFC3339 timestamp; null when eligible=true
   "cooldown_secs_remaining": 0,           // 0 when eligible=true
   "drained": false,                       // explicit "faucet is dry" signal
@@ -88,7 +88,7 @@ Field semantics:
 The split between `eligible` (one bool) and the two diagnostic fields
 matters for UX copy. The explorer can render:
 
-- `eligible: true` → green "Drip 1 LGT" button
+- `eligible: true` → green "Drip 1 AVOW" button
 - `rate_limited: true` → "Try again in 23h 47m" with countdown
 - `drained: true` → "Faucet refilling — try again later"
 - both → "Faucet temporarily drained" (suppress the cooldown noise)
@@ -152,7 +152,7 @@ saves the helper everywhere.
 - Existing `RateLimiter::check` returns `RateCheck::Allowed` /
   `RateCheck::Blocked { retry_after }` — the `retry_after` Duration
   is exactly what `cooldown_secs_remaining` and `next_drip_at` need.
-- `current_budget_nano` lookup uses `LigateClient::getBalance(faucet_addr, LGT_TOKEN_ID)`
+- `current_budget_nano` lookup uses `LigateClient::getBalance(faucet_addr, AVOW_TOKEN_ID)`
   with a 5-second TTL cache. Cache lives in `AppState` as
   `Arc<RwLock<Option<(Instant, u128)>>>`.
 - Both endpoints land in the same handler file

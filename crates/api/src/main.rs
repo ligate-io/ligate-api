@@ -7,7 +7,7 @@
 //!   per-address. Ported from the (now-archived) `ligate-io/faucet`
 //!   repo.
 //! - **Discord faucet bot** — `POST /v1/drip-bot`. Same signer, tiered
-//!   amounts (100/250/500/1000 LGT by Discord server tenure), 5-day
+//!   amounts (100/250/500/1000 AVOW by Discord server tenure), 5-day
 //!   cooldown persisted to Postgres. Gated on `X-Bot-Secret` header
 //!   so the larger amounts can't be hit by anonymous web callers.
 //!   See `crates/api/src/bot_drip.rs`.
@@ -126,9 +126,9 @@ async fn main() -> Result<()> {
 
     // Build the drip signer.
     let token_id_bytes =
-        hex::decode(&config.lgt_token_id_hex).context("LGT_TOKEN_ID must be valid hex")?;
-    let lgt_token_id = TokenId::try_from(token_id_bytes.as_slice())
-        .map_err(|e| anyhow::anyhow!("LGT_TOKEN_ID wrong shape: {e:?}"))?;
+        hex::decode(&config.avow_token_id_hex).context("AVOW_TOKEN_ID must be valid hex")?;
+    let avow_token_id = TokenId::try_from(token_id_bytes.as_slice())
+        .map_err(|e| anyhow::anyhow!("AVOW_TOKEN_ID wrong shape: {e:?}"))?;
     // Seed the in-memory nonce counter from chain unless the operator
     // explicitly pinned it via `DRIP_STARTING_NONCE`. Auto-seeding is
     // what makes a Railway redeploy safe: without it, the counter
@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
         config.chain_rpc.clone(),
         config.chain_id,
         config.chain_hash,
-        lgt_token_id,
+        avow_token_id,
         config.drip_starting_nonce,
     )
     .await
@@ -166,8 +166,8 @@ async fn main() -> Result<()> {
                 let budget = balance / config.drip_amount;
                 if (budget as u64) < config.drip_min_budget {
                     anyhow::bail!(
-                        "drip signer balance ({balance} nano-LGT) covers only {budget} drips at \
-                         {} nano-LGT/drip; minimum is {} (DRIP_MIN_BUDGET). Fund the signer or \
+                        "drip signer balance ({balance} nano-AVOW) covers only {budget} drips at \
+                         {} nano-AVOW/drip; minimum is {} (DRIP_MIN_BUDGET). Fund the signer or \
                          lower DRIP_AMOUNT before starting.",
                         config.drip_amount,
                         config.drip_min_budget,
@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
         // Discord faucet bot endpoint. Header-gated via X-Bot-Secret;
         // tiered amounts; 5-day cooldown persisted to Postgres.
         // Independent of the web faucet's per-address counter so a
-        // user can stack 100 LGT/24h (web) AND 100-1000 LGT/5d (bot)
+        // user can stack 100 AVOW/24h (web) AND 100-1000 AVOW/5d (bot)
         // on the same address. Disabled if FAUCET_BOT_SECRET is unset.
         .route("/v1/drip-bot", post(bot_drip::drip_bot))
         // Indexer queries — stubbed in v0; flesh out in subsequent PRs
@@ -302,7 +302,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Query the drip signer's own LGT balance with bounded retries.
+/// Query the drip signer's own AVOW balance with bounded retries.
 /// Mirrors the pattern in the (now-archived) faucet repo's main.rs.
 async fn query_balance_with_retry(
     signer: &Signer,
