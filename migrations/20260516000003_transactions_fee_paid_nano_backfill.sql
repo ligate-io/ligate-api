@@ -10,7 +10,7 @@
 -- Until this migration:
 --   - Indexer wrote `fee_paid_nano = NULL` on every tx insert
 --   - Explorer rendered "fee not exposed yet" on every tx detail page
---   - Couldn't distinguish "0 LGT (real)" from "unknown (not yet
+--   - Couldn't distinguish "0 AVOW (real)" from "unknown (not yet
 --     surfaced)" in the wire format
 --
 -- This migration:

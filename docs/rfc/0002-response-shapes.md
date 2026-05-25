@@ -58,7 +58,7 @@ cheaper than refactoring three repos. Specifically:
 | Optional fields | Always present, `null` if absent | No `undefined` vs `missing` ambiguity |
 
 Rationale on amounts: a partner's `1_000_000_000_000_000_000_000n` (1
-billion LGT in nano-LGT) breaks `JSON.parse` silently in JS. Decimal
+billion AVOW in nano-AVOW) breaks `JSON.parse` silently in JS. Decimal
 strings round-trip via `BigInt(str)` cleanly. Cost: clients pay one
 `BigInt()` parse per field. Worth it.
 
@@ -115,7 +115,7 @@ need a join. Detailed tx list lives at `/v1/blocks/{height}/txs`
   "sender": "lig1...",                     // address derived from pubkey[..28]
   "sender_pubkey": "lpk1...",
   "nonce": 42,
-  "fee_paid_nano": "1000000",              // u128 string, in nano-LGT
+  "fee_paid_nano": "1000000",              // u128 string, in nano-AVOW
   "kind": "transfer",                      // tagged union: see "Tx kinds" below
   "details": {
     // shape depends on `kind`

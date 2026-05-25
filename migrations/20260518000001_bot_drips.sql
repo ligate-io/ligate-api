@@ -6,7 +6,7 @@
 -- state, and Railway restarts are rare.
 --
 -- The Discord faucet (`POST /v1/drip-bot`) runs on a 5-day cooldown with
--- tier-aware amounts (100/250/500/1000 LGT). At 5 days, an in-process
+-- tier-aware amounts (100/250/500/1000 AVOW). At 5 days, an in-process
 -- map would lose multiple-day cooldowns on every restart, which is a
 -- real abuse window. So we persist bot drips to Postgres.
 --
@@ -31,9 +31,9 @@ CREATE TABLE bot_drips (
     -- Cooldown lookup key #2: "last drip BY this user".
     discord_user_id TEXT NOT NULL,
 
-    -- Amount dripped, in nano-LGT. u128 fits in NUMERIC(39, 0); we use
+    -- Amount dripped, in nano-AVOW. u128 fits in NUMERIC(39, 0); we use
     -- NUMERIC because Postgres has no native u128 / unsigned types and
-    -- bigint (i64) overflows at ~9.2 nano-LGT supply — fine today,
+    -- bigint (i64) overflows at ~9.2 nano-AVOW supply — fine today,
     -- not OK long-term.
     amount_nano NUMERIC(39, 0) NOT NULL,
 

@@ -357,7 +357,7 @@
     },
     {
       "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "ligate-api" },
-      "description": "Top 10 LGT holders by current balance. Queried live from the chain's bank module; refreshed every 30s (matches the api's stats cache TTL).",
+      "description": "Top 10 AVOW holders by current balance. Queried live from the chain's bank module; refreshed every 30s (matches the api's stats cache TTL).",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -375,7 +375,7 @@
             "properties": [{ "id": "custom.width", "value": 60 }]
           },
           {
-            "matcher": { "id": "byName", "options": "Balance (LGT)" },
+            "matcher": { "id": "byName", "options": "Balance (AVOW)" },
             "properties": [
               { "id": "unit", "value": "short" },
               { "id": "decimals", "value": 4 }
@@ -403,11 +403,11 @@
           "columns": [
             { "selector": "rank", "text": "Rank", "type": "number" },
             { "selector": "address", "text": "Address", "type": "string" },
-            { "selector": "balance_lgt", "text": "Balance (LGT)", "type": "number" }
+            { "selector": "balance_avow", "text": "Balance (AVOW)", "type": "number" }
           ]
         }
       ],
-      "title": "Top 10 LGT holders",
+      "title": "Top 10 AVOW holders",
       "type": "table"
     },
     {

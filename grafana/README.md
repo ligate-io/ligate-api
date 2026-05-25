@@ -108,7 +108,7 @@ Two timeseries panels:
 
 One table:
 
-- Top 10 LGT holders: live-queried from chain via
+- Top 10 AVOW holders: live-queried from chain via
   `/v1/stats/top-holders?n=10`. Refreshes every 30s (api stats cache
   TTL). Pre-mainnet this iterates every indexed address and queries
   the bank module per address; future indexer migration adds a

@@ -116,14 +116,14 @@ pub struct DripResponse {
     /// whichever chain rev the faucet is pointed at without code
     /// changes.
     pub tx_hash: String,
-    /// Amount dripped, in nano-LGT (u128 fits in JSON number for the
+    /// Amount dripped, in nano-AVOW (u128 fits in JSON number for the
     /// `1e9 * default_drip` values we use). Decimal-string preferred
     /// over numbers per RFC 0002 for amounts >2^53, but the drip
     /// default sits well below that ceiling.
     pub amount_nano: u128,
     /// Convenience `amount_nano / 1e9` rendered as a float for human
     /// display; not for accounting. Source of truth is `amount_nano`.
-    pub drip_amount_lgt: f64,
+    pub drip_amount_avow: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,7 +135,7 @@ pub struct ErrorResponse {
 #[derive(Debug, Serialize)]
 pub struct DripStatusResponse {
     pub drip_amount_nano: u128,
-    pub drip_amount_lgt: f64,
+    pub drip_amount_avow: f64,
     pub rate_limit_secs: u64,
     pub addresses_dripped: usize,
     pub faucet_address: String,
@@ -223,7 +223,7 @@ pub async fn drip_status(
     let drip_nano = state.config.drip_amount;
     Json(DripStatusBody::Global(DripStatusResponse {
         drip_amount_nano: drip_nano,
-        drip_amount_lgt: nano_to_lgt(drip_nano),
+        drip_amount_avow: nano_to_avow(drip_nano),
         rate_limit_secs: state.config.drip_rate_limit_secs,
         addresses_dripped: state.rate_limiter.drip_count(),
         faucet_address: state.signer.address(),
@@ -288,7 +288,7 @@ pub async fn drip(
         address: req.address,
         tx_hash: receipt.tx_hash,
         amount_nano: receipt.amount_nano,
-        drip_amount_lgt: nano_to_lgt(receipt.amount_nano),
+        drip_amount_avow: nano_to_avow(receipt.amount_nano),
     }))
 }
 
@@ -713,12 +713,12 @@ pub async fn address_summary(
     };
 
     // Live gas-token balance via the drip signer's NodeClient (it
-    // already knows the LGT token id from boot config). On failure,
+    // already knows the AVOW token id from boot config). On failure,
     // surface an empty balances vec rather than 502'ing — counters
     // are still useful even when chain RPC is briefly down.
     let balances = match state.signer.query_balance_for(&addr).await {
         Ok(b) => vec![crate::responses::TokenBalanceResponse {
-            token_id: state.signer.lgt_token_id_bech32(),
+            token_id: state.signer.avow_token_id_bech32(),
             amount_nano: b.to_string(),
         }],
         Err(e) => {
@@ -999,7 +999,7 @@ fn schema_row_to_response(row: queries::SchemaRow) -> SchemaResponse {
 
 // ---- helpers ---------------------------------------------------------------
 
-fn nano_to_lgt(nano: u128) -> f64 {
+fn nano_to_avow(nano: u128) -> f64 {
     (nano as f64) / 1_000_000_000.0
 }
 

@@ -253,7 +253,7 @@ pub struct BankBalanceResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BankBalance {
-    /// Balance in base units (nanos for `$LGT`), serialized as a string
+    /// Balance in base units (nanos for AVOW), serialized as a string
     /// because the chain returns `u64` as a JSON string to avoid loss
     /// of precision in JS clients.
     pub amount: String,

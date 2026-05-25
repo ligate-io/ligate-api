@@ -65,12 +65,12 @@ GET  /v1/stats/attestations-daily            → daily attestations (powers 30d 
 GET  /v1/stats/drips-daily                   → daily faucet drips, broken down by source
                                                 (web vs Discord bot); powers the cost
                                                 dashboard's drips-per-day panel
-GET  /v1/stats/top-holders                   → top LGT holders
+GET  /v1/stats/top-holders                   → top AVOW holders
 
 # Faucet / drip
 POST /v1/drip                                → body {address}, returns
-                                                {address, tx_hash, amount_nano, drip_amount_lgt}
-GET  /v1/drip/status                         → drip_amount_nano, drip_amount_lgt,
+                                                {address, tx_hash, amount_nano, drip_amount_avow}
+GET  /v1/drip/status                         → drip_amount_nano, drip_amount_avow,
                                                 rate_limit_secs, addresses_dripped, faucet_address
 GET  /v1/drip/status?address={addr}          → {can_drip, next_drip_at} (per-address shape;
                                                 untagged enum, same path)
@@ -82,10 +82,10 @@ POST /v1/drip-bot                            → header X-Bot-Secret required;
                                                 {tx_hash, amount_nano, tier,
                                                 next_drip_available_at}.
                                                 Tier amounts (configurable):
-                                                  newcomer (<7d in server)  → 100 LGT
-                                                  regular   (7-30d)         → 250 LGT
-                                                  veteran   (30-90d)        → 500 LGT
-                                                  elder     (90+d)          → 1000 LGT
+                                                  newcomer (<7d in server)  → 100 AVOW
+                                                  regular   (7-30d)         → 250 AVOW
+                                                  veteran   (30-90d)        → 500 AVOW
+                                                  elder     (90+d)          → 1000 AVOW
                                                 Independent 5-day cooldown
                                                 on per-address AND per-Discord-user;
                                                 independent of /v1/drip's per-address counter.
@@ -140,7 +140,7 @@ DATABASE_URL=postgres://postgres:local@localhost:5432/ligate_api \
 CHAIN_RPC=http://localhost:12346 \
 CHAIN_ID=4242 \
 CHAIN_HASH=$(curl -s http://localhost:12346/v1/rollup/info | jq -r .chain_hash) \
-LGT_TOKEN_ID=token_1nyl0e0yweragfsatygt24zmd8jrr2vqtvdfptzjhxkguz2xxx3vs0y07u7 \
+AVOW_TOKEN_ID=token_1nyl0e0yweragfsatygt24zmd8jrr2vqtvdfptzjhxkguz2xxx3vs0y07u7 \
 DRIP_SIGNER_KEY=0101010101010101010101010101010101010101010101010101010101010101 \
 DRIP_MIN_BUDGET=0 \
 cargo run --bin ligate-api
@@ -150,9 +150,9 @@ curl http://localhost:8080/v1/health
 curl http://localhost:8080/v1/drip/status
 ```
 
-`CHAIN_ID=4242` is the numeric chain id used by `ligate-devnet-1` and the localnet genesis we ship in `ligate-chain/devnet/`. The Sovereign SDK demo default is `4321`; do not use it, your txs won't include in the local chain. `LGT_TOKEN_ID` is the canonical `$LGT` token id minted by `devnet/genesis/bank.json`; it's a stable constant, no derivation step needed.
+`CHAIN_ID=4242` is the numeric chain id used by the `ligate-localnet` config the chain ships in `ligate-chain/localnet/` (renamed from `devnet/` in chain v0.3.0). The Sovereign SDK demo default is `4321`; do not use it, your txs won't include in the local chain. `AVOW_TOKEN_ID` is the canonical AVOW token id minted by `localnet/genesis/bank.json`; it's a stable constant, no derivation step needed.
 
-The dev key (`0x01...01`) is the chain's localnet dev keypair — pre-funded with 10000 LGT in `devnet/genesis/bank.json`. Don't use it on devnet/testnet/mainnet.
+The dev key (`0x01...01`) is the chain's localnet dev keypair — pre-funded with 10000 AVOW in `localnet/genesis/bank.json`. Don't use it on devnet/testnet/mainnet.
 
 ## Deploy: Railway
 
@@ -160,7 +160,7 @@ The dev key (`0x01...01`) is the chain's localnet dev keypair — pre-funded wit
 
 1. Connect this repo to a Railway project (Settings → Connect GitHub).
 2. Add a Postgres plugin to the project. `DATABASE_URL` auto-wires.
-3. Set the chain-side env vars (`CHAIN_RPC`, `CHAIN_ID`, `CHAIN_HASH`, `LGT_TOKEN_ID`).
+3. Set the chain-side env vars (`CHAIN_RPC`, `CHAIN_ID`, `CHAIN_HASH`, `AVOW_TOKEN_ID`).
 4. Set `DRIP_SIGNER_KEY` as a Secret-type variable (NOT plain).
 5. Optional: `DRIP_AMOUNT`, `DRIP_RATE_LIMIT_SECS`, `DRIP_MIN_BUDGET` to override defaults.
 6. Push to `main` → Railway builds and deploys via Dockerfile.

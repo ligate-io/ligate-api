@@ -1,4 +1,4 @@
-//! Drip primitives: signer + rate-limiter for the LGT faucet.
+//! Drip primitives: signer + rate-limiter for the AVOW faucet.
 //!
 //! Ported from the standalone `ligate-io/faucet` repo (now archived) into
 //! `ligate-api` so the unified API service hosts faucet drips alongside

@@ -6,6 +6,31 @@ Format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). I
 
 ## [Unreleased]
 
+### Changed (BREAKING — wire format + env vars)
+
+- **Token symbol renamed `$LGT` → `AVOW` everywhere** (tracks `ligate-chain#457`, lands alongside chain v0.3.0). The dollar-prefix prose ticker drops; the new symbol is plain `AVOW`, 4 chars, no `$`. Substitutions cover three surfaces:
+  - **Env vars** (operator coordination required at Railway):
+    - `LGT_TOKEN_ID` → `AVOW_TOKEN_ID`
+    - `LGT_TREASURY_ADDR` → `AVOW_TREASURY_ADDR`
+  - **Wire response fields**:
+    - `DripResponse.drip_amount_lgt` → `drip_amount_avow` (f64 human-display field on `POST /v1/drip`)
+    - `DripBotResponse.amount_lgt` → `amount_avow` (f64 human-display field on `POST /v1/drip-bot`)
+    - `TopHoldersResponse.holders[].balance_lgt` → `balance_avow` (f64 human-display field on `GET /v1/stats/top-holders`)
+  - **Rust identifiers** (internal, but called out for diff readers): `Config.lgt_token_id_hex` → `avow_token_id_hex`, `Config.lgt_treasury_addr` → `avow_treasury_addr`, `Signer.lgt_token_id` → `avow_token_id`, `Signer.lgt_token_id_bech32()` → `avow_token_id_bech32()`, `handlers::nano_to_lgt` → `nano_to_avow`, `bot_drip::nano_to_lgt` → `nano_to_avow`.
+- **Chain dep pin: `branch = "main"` → `tag = "v0.3.0"`** for `attestation`, `ligate-client`, `ligate-stf`, `ligate-rollup`. Pins reproducibly to the known-compatible chain release; bump deliberately rather than drifting on chain main. Matching SDK pin under `[patch."https://github.com/Sovereign-Labs/sovereign-sdk.git"]` left alone since chain v0.3.0 was built against the same fork rev (`eab3f9d0`).
+- **Local-dev path**: chain v0.3.0 renamed `devnet/` → `localnet/`. README quickstart updated to reference `~/Desktop/ligate-chain/localnet/` and `localnet/genesis/bank.json`. The actual local chain_id stays `ligate-localnet`; the AVOW token id literal stays `token_1nyl0e0yweragfsatygt24zmd8jrr2vqtvdfptzjhxkguz2xxx3vs0y07u7`.
+- **Past CHANGELOG entries retroactively rewritten**: `LGT` → `AVOW`, `nano-LGT` → `nano-AVOW` across the [0.2.1] and [0.1.0-devnet] dated sections. Amounts and PR numbers are unchanged; only the ticker text. The historical PRs themselves shipped under the `$LGT` name; the rewrite is for documentation-consistency, not to misattribute past work.
+
+### Migration / coordination
+
+Hold this release until chain v0.3.0 is deployed to whatever public devnet replaces `ligate-devnet-1` (likely `ligate-devnet-2`). Operator sequence:
+
+1. Chain v0.3.0 deploys, fresh genesis, `chain_hash` differs from devnet-1.
+2. Update Railway env vars: rename `LGT_TOKEN_ID` → `AVOW_TOKEN_ID`, `LGT_TREASURY_ADDR` → `AVOW_TREASURY_ADDR`. Update `CHAIN_HASH` + `CHAIN_RPC` to point at the new chain.
+3. Redeploy api against the new chain.
+
+Until the chain side flips, this api commit is incompatible with the still-LGT devnet-1.
+
 ### Added
 
 - `GET /v1/attestor-sets/by-member/{pubkey}` — paginated list of attestor sets whose `members` JSONB array contains the given bech32m `lpk1...` pubkey. Same `Page<AttestorSetResponse>` envelope and `(registered_at_slot, id)` cursor as `/v1/attestor-sets`, so dashboard clients reuse the existing pagination plumbing. Uses the GIN index on `attestor_sets.members` (already present from the original indexer migration) via the JSONB `@>` operator, so the WHERE is an index seek not a full table scan. `schema_count` is read from the denormalised column the indexer already maintains, not recomputed via a per-row LEFT JOIN. Path-param `pubkey` is bech32m-validated (HRP `lpk` + 32-byte payload); typos return 400 `invalid_pubkey` instead of an opaque empty 200. Empty memberships return 200 with `data: []` (absence is a valid answer, not a missing resource). Powers the themisra-dashboard Settings panel's "you're a member of N sets" view (closes audit gap #4 from `ligate-io/themisra-dashboard#34`).
@@ -16,10 +41,10 @@ Format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). I
   All three share a `LeaderboardResponse { window: "all-time", rows: [{ rank, address, count }] }` shape so Grafana table panels can use one template per leaderboard. `n` defaults to 10, capped at 100. 30s in-process cache + `Cache-Control: public, max-age=30` matching the rest of `/v1/stats/*`. Powers the chain Grafana dashboard's forthcoming "Activity leaders" row (filed as a follow-up issue) and a future explorer leaderboard page.
 - `slots.da_block_height` column (migration `20260518000002_slots_da_block_height.sql`) + matching `da_block_height: Option<u64>` field on `BlockResponse`. The indexer's `extract_slot_first_batch_facts` (renamed from `extract_slot_proposer` to reflect that it now pulls two related fields from the same first-batch fetch) reads `receipt.da_block_height` from chain v0.2.3+ batch JSON and writes the BIGINT through the existing slot upsert. COALESCE-preserve semantics mirror the `proposer` column: a re-poll that can't reach batches doesn't blank a known value. `null` on slots ingested before chain v0.2.3 (no backfill yet) and on slots whose first-batch fetch fails. Powers the explorer's "View on Celenium" deep-link per `ligate-io/ligate-chain#355` (`https://mocha.celenium.io/block/{da_block_height}` — singular `/block/`; `/blocks` is the list page).
 - `GET /v1/stats/drips-daily?days=N` endpoint. Returns daily faucet-drip counts broken down by source: `web` (chain-side count of `bank.transfer` txs from the faucet sender, read from the indexer's `transactions` table) and `bot` (api-side count from `bot_drips`). Powers the cost dashboard's drips-per-day panel without Grafana needing to aggregate two heterogeneous sources client-side. Same `DailyPoint`-style shape as `/v1/stats/attestations-daily`. 30s cached, capped at 90 days of history.
-- `POST /v1/drip-bot` endpoint for the Discord faucet bot. Header-gated via `X-Bot-Secret`; uses the same hot-key signer as `POST /v1/drip` so there's a single nonce stream and no inter-endpoint coordination. Tier-aware amounts validated server-side (100 / 250 / 500 / 1000 LGT for newcomer / regular / veteran / elder, by Discord server tenure). 5-day cooldown, applied independently to (a) per-address and (b) per-Discord-user counters; both must clear. Endpoint disabled (returns 503) if `FAUCET_BOT_SECRET` is unset, so safe to merge before the bot is deployed.
+- `POST /v1/drip-bot` endpoint for the Discord faucet bot. Header-gated via `X-Bot-Secret`; uses the same hot-key signer as `POST /v1/drip` so there's a single nonce stream and no inter-endpoint coordination. Tier-aware amounts validated server-side (100 / 250 / 500 / 1000 AVOW for newcomer / regular / veteran / elder, by Discord server tenure). 5-day cooldown, applied independently to (a) per-address and (b) per-Discord-user counters; both must clear. Endpoint disabled (returns 503) if `FAUCET_BOT_SECRET` is unset, so safe to merge before the bot is deployed.
 - `bot_drips` Postgres table for durable cooldown state (`migrations/20260518000001_bot_drips.sql`). Two B-tree indexes on `(address, dripped_at DESC)` and `(discord_user_id, dripped_at DESC)` so each cooldown check is a single index seek. Cooldowns persisted to Postgres (not in-memory like the web faucet's `RateLimiter`) because Railway restarts during a 5-day window would otherwise lose multi-day cooldowns.
 - New `Config` fields: `FAUCET_BOT_SECRET` (None = endpoint disabled), `BOT_DRIP_RATE_LIMIT_SECS` (default 432000s = 5d), `BOT_DRIP_AMOUNT_{NEWCOMER,REGULAR,VETERAN,ELDER}` (defaults match the proposal). All env-tunable for later curve adjustments without code changes.
-- Stacking model: a user can hit both faucets on the same address: 100 LGT/24h from `/v1/drip` (anon) AND up to 1000 LGT/5d from `/v1/drip-bot` (Discord-tier). The two counters are independent so each clears on its own schedule.
+- Stacking model: a user can hit both faucets on the same address: 100 AVOW/24h from `/v1/drip` (anon) AND up to 1000 AVOW/5d from `/v1/drip-bot` (Discord-tier). The two counters are independent so each clears on its own schedule.
 
 ## [0.2.1] - 2026-05-17
 
@@ -68,7 +93,7 @@ The api hosts both the drip (faucet) endpoints and the indexer query surface tha
 - **`/v1/addresses/{addr}`** — balance + tx counts + first/last seen + schemas-owned + attestor-set memberships.
 - **`/v1/addresses/{addr}/txs`** — paginated tx history for one address. Returns txs where the address participated in any role (`sender` for any kind, or `from` / `to` in a transfer's JSONB details). Same envelope + cursor shape as `/v1/txs`; explorer reuses its existing adapter with a different URL. (#52)
 - **`/v1/search?q=...`** — single-endpoint resolver across block height / `lblk1...` block hash / `ltx1...` tx hash / `lig1...` address / `lsc1...` schema / `las1...` attestor set / `lph1...` payload hash / `lsc1...:lph1...` composite attestation id. (#50)
-- **`/v1/stats/totals`** — single object with all chain-level counts (blocks, txs, addresses, schemas, attestor sets, attestations, total LGT supply, treasury balance, treasury address). Treasury fields added in (#42).
+- **`/v1/stats/totals`** — single object with all chain-level counts (blocks, txs, addresses, schemas, attestor sets, attestations, total AVOW supply, treasury balance, treasury address). Treasury fields added in (#42).
 - **`/v1/stats/finality`** — DA finalization p50 / p95 / p99 percentiles. Observed sampling over last 1h of `slots.finalized_at - slots.timestamp`; falls back to hardcoded estimate when sample count < 20. `source` flips from "estimated" to "observed" once enough flips are logged. (#44)
 - **`/v1/stats/next-block-eta`** — live block-cadence prediction. Mean + p95 interval over last 100 slots, `expected_next_at`, `seconds_until_expected` (negative when overdue), `indexer_lag_secs` (true `(chain_head - last_indexed_height) × mean` after #46). (#43, #46)
 - **`/v1/stats/active-addresses`, `/v1/stats/new-wallets-daily`, `/v1/stats/tx-rate-daily`, `/v1/stats/top-holders`** — growth + distribution metrics powering both the explorer key-numbers row and the [investor Grafana dashboard](https://ligate.grafana.net/d/ligate-investor).
@@ -77,9 +102,9 @@ The api hosts both the drip (faucet) endpoints and the indexer query surface tha
 
 ### Storage / schema
 
-- `transactions.protocol_fee_nano` column (migration 0005) — distinct from `fee_paid_nano` (gas). Flat per-call-type module fee routed to treasury / builder share via the schema's `fee_routing_bps`. Devnet-1 values: register_attestor_set = 0.05 LGT, register_schema = 0.10 LGT, submit_attestation = 0.0001 LGT, transfer = 0. (#43)
+- `transactions.protocol_fee_nano` column (migration 0005) — distinct from `fee_paid_nano` (gas). Flat per-call-type module fee routed to treasury / builder share via the schema's `fee_routing_bps`. Devnet-1 values: register_attestor_set = 0.05 AVOW, register_schema = 0.10 AVOW, submit_attestation = 0.0001 AVOW, transfer = 0. (#43)
 - `slots.proposer`, `slots.finality_status`, `slots.finalized_at` columns (migration 0006). Plus `slots.prev_hash` backfill via correlated subquery for historical rows. (#44)
-- `transactions.fee_paid_nano` backfilled to `0` (migration 0007). Future inserts write 0 explicitly rather than NULL — gas pricing on devnet bills 0 (`gas_used = [0, 0]` even though `gas_price = [7, 7]`), so "0 LGT (real)" is more honest than "null (unknown)". (#49)
+- `transactions.fee_paid_nano` backfilled to `0` (migration 0007). Future inserts write 0 explicitly rather than NULL — gas pricing on devnet bills 0 (`gas_used = [0, 0]` even though `gas_price = [7, 7]`), so "0 AVOW (real)" is more honest than "null (unknown)". (#49)
 
 ### Performance
 
@@ -95,7 +120,7 @@ The api hosts both the drip (faucet) endpoints and the indexer query surface tha
 - `/v1/search?q=lsc1...` and `?q=las1...` 500'd because `SELECT 1` returns int4 but sqlx expected int8. Rewrote both as `SELECT EXISTS(...)` returning a clean bool. (#50)
 - `/v1/search?q=lsc1...:lph1...` composite attestation id — previously returned `not_found` (no branch handled it). Added composite-id branch with `attestation_pair_exists` query. (#50)
 - Indexer was silently dropping attestation txs because the chain emits `AttestationModule/AttestorSetRegistered` with PascalCase event names + raw bech32m strings, not the `Attestation/` snake_case shape the parser expected. Fixed event matching to chain reality. (#40)
-- Two queries.rs docstrings claimed module-default fee values (`10/100/0.001 LGT`); corrected to actual devnet-1 genesis overrides (`0.05/0.10/0.0001 LGT`). The `fee_paid_nano` docstring also corrected from "gas_price = 0" to "gas_used = 0" — chain meters but doesn't bill in v0. (#47)
+- Two queries.rs docstrings claimed module-default fee values (`10/100/0.001 AVOW`); corrected to actual devnet-1 genesis overrides (`0.05/0.10/0.0001 AVOW`). The `fee_paid_nano` docstring also corrected from "gas_price = 0" to "gas_used = 0" — chain meters but doesn't bill in v0. (#47)
 
 ### Followups (tracked, deferred to post-launch or post-mainnet)
 
@@ -117,7 +142,7 @@ The api hosts both the drip (faucet) endpoints and the indexer query surface tha
 - Multi-stage `Dockerfile` for `linux/amd64` + `linux/arm64`. Two-stage build (Rust toolchain → debian-slim runtime) producing a ~50 MB image with the `ligate-api` binary. Same risc0-skip env vars chain repo's CI uses (`SKIP_GUEST_BUILD=1`, `RISC0_SKIP_BUILD_KERNELS=1`, `CONSTANTS_MANIFEST_PATH`).
 - `railway.toml` deploy config: Dockerfile builder, on_failure restart policy, `/health` healthcheck. Postgres plugin auto-wires `DATABASE_URL`; chain-identity vars (`CHAIN_RPC`, `CHAIN_ID`, `CHAIN_HASH`, `LGT_TOKEN_ID`) and `DRIP_SIGNER_KEY` set per-environment in the Railway UI.
 - CORS `permissive()` on every public endpoint (mirror of faucet#7) so partner web apps (`mneme.ligate.io`, Themisra demo pages, `explorer.ligate.io` itself) can hit the API from arbitrary origins without preflight blocks. Tighten the origin allow-list at testnet+.
-- Startup drip-budget sanity check (mirror of faucet#7): the api queries the drip signer's own LGT balance on boot via `Submitter::get_balance_for_holder`, divides by `DRIP_AMOUNT`, and refuses to start if the budget covers fewer than `DRIP_MIN_BUDGET` drips (default 100; set to `0` to skip). Catches the typo class "operator set `DRIP_AMOUNT` to whole-LGT instead of nano-LGT (1e9× too much) and would drain the hot key in a handful of drips" before drips actually start.
+- Startup drip-budget sanity check (mirror of faucet#7): the api queries the drip signer's own AVOW balance on boot via `Submitter::get_balance_for_holder`, divides by `DRIP_AMOUNT`, and refuses to start if the budget covers fewer than `DRIP_MIN_BUDGET` drips (default 100; set to `0` to skip). Catches the typo class "operator set `DRIP_AMOUNT` to whole-AVOW instead of nano-AVOW (1e9× too much) and would drain the hot key in a handful of drips" before drips actually start.
 - CI workflow at `.github/workflows/ci.yml`: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo check`, `cargo test`. Single `CI pass` summary job mirrors the chain-repo / cli / faucet pattern. License: dual-licensed `Apache-2.0 OR MIT`.
 
 ### Inherited from upstream archived repos
