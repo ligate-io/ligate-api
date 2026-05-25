@@ -265,13 +265,13 @@ mod tests {
             .mock("GET", "/v1/rollup/info")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"chain_id":"ligate-devnet-1","chain_hash":"abcd","version":"0.0.1"}"#)
+            .with_body(r#"{"chain_id":"ligate-devnet-2","chain_hash":"abcd","version":"0.0.1"}"#)
             .create_async()
             .await;
 
         let client = NodeClient::new(&srv.url()).unwrap();
         let info = client.rollup_info().await.unwrap();
-        assert_eq!(info.chain_id, "ligate-devnet-1");
+        assert_eq!(info.chain_id, "ligate-devnet-2");
         assert_eq!(info.chain_hash, "abcd");
         assert_eq!(info.version, "0.0.1");
     }

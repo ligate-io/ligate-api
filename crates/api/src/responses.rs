@@ -31,7 +31,7 @@ use serde::Serialize;
 #[derive(Debug, Serialize)]
 pub struct InfoResponse {
     /// Cosmos-style chain id from the `[chain]` config block. E.g.
-    /// `ligate-localnet`, `ligate-devnet-1`, `ligate-1`.
+    /// `ligate-localnet`, `ligate-devnet-2`, `ligate-1`.
     pub chain_id: String,
     /// Build-time `CHAIN_HASH`. Bech32m-encoded with HRP `lsch`
     /// (`lsch1...`) since `ligate-chain@0ac7e5b`; matches the SDK's

@@ -44,7 +44,7 @@ pub struct Config {
     /// token is configured. See chain#442 for the gate's design.
     pub chain_cluster_auth_token: Option<String>,
 
-    /// Numeric chain id (u64, NOT the human `ligate-devnet-1` string).
+    /// Numeric chain id (u64, NOT the human `ligate-devnet-2` string).
     /// From the chain's `chain_state.json`.
     pub chain_id: u64,
 

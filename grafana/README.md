@@ -1,13 +1,13 @@
 # Grafana dashboards
 
 Dashboard JSON files for the operator + investor metrics surfaces on top
-of `ligate-devnet-1`. Import each via Grafana → Dashboards → New → Import.
+of `ligate-devnet-2`. Import each via Grafana → Dashboards → New → Import.
 
 ## Dashboards
 
 | File | Use | Data sources |
 |------|-----|--------------|
-| `ligate-devnet-1-investor-metrics.json` | High-level "key numbers, growth, holders, network performance" surface. Shown to investors, partners, design-partner intros. | `Infinity` (api), `grafanacloud-prom` (chain Prometheus). |
+| `ligate-devnet-2-investor-metrics.json` | High-level "key numbers, growth, holders, network performance" surface. Shown to investors, partners, design-partner intros. | `Infinity` (api), `grafanacloud-prom` (chain Prometheus). |
 | `operator-panel-replacements.md` | Paste-ready panel JSON for the in-Grafana operator dashboard's two misbehaving "Schemas registered" / "Attestor sets registered" stat panels. Switches them from drifting Prometheus counters to state-derived api queries. | `Infinity` (api). |
 
 The operator-focused dashboard (chain health, mempool, DA, RPC) lives in
@@ -70,11 +70,11 @@ The investor dashboard pulls api data via the
 
 ```
 Grafana → Dashboards → New → Import → Upload JSON file
-→ select ligate-devnet-1-investor-metrics.json
+→ select ligate-devnet-2-investor-metrics.json
 → confirm data source mappings → Import.
 ```
 
-Permalink-stable: the dashboard's `uid` is `ligate-devnet-1-investor`,
+Permalink-stable: the dashboard's `uid` is `ligate-devnet-2-investor`,
 so future updates re-import cleanly onto the same dashboard.
 
 ## Panel inventory
