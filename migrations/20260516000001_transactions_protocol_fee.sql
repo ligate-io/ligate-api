@@ -13,7 +13,7 @@
 --
 --   PROTOCOL fee (`protocol_fee_nano`): flat per-call-type module fee.
 --                                    Charged regardless of `gas_price`.
---                                    For attestation calls on ligate-devnet-1
+--                                    For attestation calls on ligate-devnet-2
 --                                    (`chain/devnet-1/genesis/attestation.json`):
 --                                      register_attestor_set  = 50_000_000  nano (0.05  AVOW)
 --                                      register_schema        = 100_000_000 nano (0.10  AVOW)

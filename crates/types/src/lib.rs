@@ -35,7 +35,7 @@ pub const PAYLOAD_HASH_HRP: &str = "lph";
 /// `GET /v1/rollup/info` body.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RollupInfo {
-    /// Wallet/explorer-facing chain id, e.g. `ligate-devnet-1`.
+    /// Wallet/explorer-facing chain id, e.g. `ligate-devnet-2`.
     pub chain_id: String,
     /// Build-time fingerprint of the runtime, 64-char hex.
     pub chain_hash: String,
@@ -103,7 +103,7 @@ pub struct ClusterTopology {
 /// `ChainClusterNode` without the private `address`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ClusterNode {
-    /// Stable per-VM identifier (e.g. `ligate-devnet-1-sequencer-2`).
+    /// Stable per-VM identifier (e.g. `ligate-devnet-2-sequencer-2`).
     pub node_id: String,
     /// `true` exactly for the node holding the Postgres leader lock.
     pub is_leader: bool,
@@ -690,9 +690,9 @@ mod tests {
 
     #[test]
     fn rollup_info_round_trip() {
-        let body = r#"{"chain_id":"ligate-devnet-1","chain_hash":"abcd","version":"0.0.1"}"#;
+        let body = r#"{"chain_id":"ligate-devnet-2","chain_hash":"abcd","version":"0.0.1"}"#;
         let parsed: RollupInfo = serde_json::from_str(body).unwrap();
-        assert_eq!(parsed.chain_id, "ligate-devnet-1");
+        assert_eq!(parsed.chain_id, "ligate-devnet-2");
         assert_eq!(parsed.chain_hash, "abcd");
         assert_eq!(parsed.version, "0.0.1");
     }

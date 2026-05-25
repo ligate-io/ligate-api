@@ -15,7 +15,7 @@ Two deploy artifacts (one Rust binary, one Postgres) instead of three repos and 
 
 ## Endpoints (v0)
 
-All endpoints are wired and serving on `ligate-devnet-1`. Grouped by surface:
+All endpoints are wired and serving on `ligate-devnet-2`. Grouped by surface:
 
 ```
 # Health / info
@@ -226,7 +226,7 @@ The test is skipped (not failed) when `DATABASE_URL` is unset, so plain `cargo t
 
 ## Status
 
-**Devnet.** `ligate-devnet-1` is live and the full v0 surface above is wired and serving. Faucet (`/v1/drip*`), explorer-facing indexer queries (`/v1/blocks*`, `/v1/txs*`, `/v1/addresses/*`, `/v1/schemas*`, `/v1/attestor-sets*`, `/v1/attestations*`, `/v1/search`), and analytics stats (`/v1/stats/*`) all hit Postgres. Pagination shapes, cache headers, and per-address drip status landed across PRs #44 to #55.
+**Devnet.** `ligate-devnet-2` is live and the full v0 surface above is wired and serving. Faucet (`/v1/drip*`), explorer-facing indexer queries (`/v1/blocks*`, `/v1/txs*`, `/v1/addresses/*`, `/v1/schemas*`, `/v1/attestor-sets*`, `/v1/attestations*`, `/v1/search`), and analytics stats (`/v1/stats/*`) all hit Postgres. Pagination shapes, cache headers, and per-address drip status landed across PRs #44 to #55.
 
 ## Versioning
 

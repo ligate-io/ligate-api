@@ -72,7 +72,7 @@ comparisons can `===` two ids without a normalisation step.
 
 ```jsonc
 {
-  "chain_id": "ligate-devnet-1",          // string, from chain config
+  "chain_id": "ligate-devnet-2",          // string, from chain config
   "chain_hash": "lsch1amq80arndh6...",    // bech32m with HRP `lsch`
   "version": "0.1.0-devnet",              // node binary semver
   "indexer_height": 12345,                // last slot the indexer has fully ingested
