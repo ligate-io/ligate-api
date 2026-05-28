@@ -308,6 +308,52 @@ pub async fn insert_transaction(
                 "signature_count": d.signature_count,
             }),
         ),
+        IndexerTx::PostBounty(d) => (
+            "post_bounty",
+            serde_json::json!({
+                "bounty_id": d.bounty_id,
+                "poster": d.poster,
+                "pool_amount_nano": d.pool_amount_nano,
+                "pool_token_id": d.pool_token_id,
+            }),
+        ),
+        IndexerTx::ClaimBounty(d) => (
+            "claim_bounty",
+            serde_json::json!({
+                "bounty_id": d.bounty_id,
+                "attestation_id": d.attestation_id,
+                "payout_amount_nano": d.payout_amount_nano,
+                "payout_token_id": d.payout_token_id,
+                "attester": d.attester,
+            }),
+        ),
+        IndexerTx::DisputeAttestation(d) => (
+            "dispute_attestation",
+            serde_json::json!({
+                "bounty_id": d.bounty_id,
+                "attestation_id": d.attestation_id,
+                "disputer": d.disputer,
+                "bond_amount_nano": d.bond_amount_nano,
+                "bond_token_id": d.bond_token_id,
+            }),
+        ),
+        IndexerTx::ResolveDispute(d) => (
+            "resolve_dispute",
+            serde_json::json!({
+                "bounty_id": d.bounty_id,
+                "attestation_id": d.attestation_id,
+                "decision": d.decision,
+                "bond_recipient": d.bond_recipient,
+            }),
+        ),
+        IndexerTx::CancelBounty(d) => (
+            "cancel_bounty",
+            serde_json::json!({
+                "bounty_id": d.bounty_id,
+                "refunded_amount_nano": d.refunded_amount_nano,
+                "refunded_token_id": d.refunded_token_id,
+            }),
+        ),
         IndexerTx::Unknown { event_keys } => (
             "unknown",
             // RFC 0002 reserves `raw_call_disc: [u8, u8]` for the
@@ -352,7 +398,10 @@ pub async fn insert_transaction(
         IndexerTx::RegisterAttestorSet(d) => Some(d.registered_by.as_str()),
         IndexerTx::RegisterSchema(d) => Some(d.owner.as_str()),
         IndexerTx::SubmitAttestation(d) => Some(d.submitter.as_str()),
-        IndexerTx::Unknown { .. } => None,
+        IndexerTx::PostBounty(d) => Some(d.poster.as_str()),
+        IndexerTx::ClaimBounty(d) => Some(d.attester.as_str()),
+        IndexerTx::DisputeAttestation(d) => Some(d.disputer.as_str()),
+        IndexerTx::ResolveDispute(_) | IndexerTx::CancelBounty(_) | IndexerTx::Unknown { .. } => None,
     };
 
     // Protocol fee: flat per-kind constant from devnet-1's
@@ -372,6 +421,11 @@ pub async fn insert_transaction(
         IndexerTx::RegisterAttestorSet(_) => Some(50_000_000),
         IndexerTx::RegisterSchema(_) => Some(100_000_000),
         IndexerTx::SubmitAttestation(_) => Some(100_000),
+        IndexerTx::PostBounty(_)
+        | IndexerTx::ClaimBounty(_)
+        | IndexerTx::DisputeAttestation(_)
+        | IndexerTx::ResolveDispute(_)
+        | IndexerTx::CancelBounty(_) => None,
         IndexerTx::Unknown { .. } => None,
     };
 

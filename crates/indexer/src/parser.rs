@@ -37,7 +37,9 @@
 
 use ligate_api_types::{
     AttestationAttestationSubmittedEvent, AttestationAttestorSetRegisteredEvent,
-    AttestationSchemaRegisteredEvent, BankTokenTransferredEvent, LedgerEvent, LedgerTx,
+    AttestationSchemaRegisteredEvent, BankTokenTransferredEvent, BountyBountyClaimedEvent,
+    BountyBountyDisputedEvent, BountyBountyExpiredEvent, BountyBountyPostedEvent,
+    BountyDisputeResolvedEvent, LedgerEvent, LedgerTx,
 };
 
 /// Event-key constant for the Bank module's `TokenTransferred` event.
@@ -55,6 +57,12 @@ const KEY_BANK_TOKEN_TRANSFERRED: &str = "Bank/TokenTransferred";
 const KEY_ATTESTATION_ATTESTOR_SET_REGISTERED: &str = "AttestationModule/AttestorSetRegistered";
 const KEY_ATTESTATION_SCHEMA_REGISTERED: &str = "AttestationModule/SchemaRegistered";
 const KEY_ATTESTATION_ATTESTATION_SUBMITTED: &str = "AttestationModule/AttestationSubmitted";
+
+const KEY_BOUNTY_POSTED: &str = "Bounty/BountyPosted";
+const KEY_BOUNTY_CLAIMED: &str = "Bounty/BountyClaimed";
+const KEY_BOUNTY_DISPUTED: &str = "Bounty/BountyDisputed";
+const KEY_BOUNTY_RESOLVED: &str = "Bounty/DisputeResolved";
+const KEY_BOUNTY_EXPIRED: &str = "Bounty/BountyExpired";
 
 /// Tx outcome from the chain receipt's `result` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +108,16 @@ pub enum IndexerTx {
     /// `Attestation/AttestationSubmitted`. Mirrors RFC 0002's
     /// `details` shape for `kind = "submit_attestation"`.
     SubmitAttestation(IndexerSubmitAttestation),
+    /// `Bounty/BountyPosted`.
+    PostBounty(IndexerPostBounty),
+    /// `Bounty/BountyClaimed`.
+    ClaimBounty(IndexerClaimBounty),
+    /// `Bounty/BountyDisputed`.
+    DisputeAttestation(IndexerDisputeAttestation),
+    /// `Bounty/DisputeResolved`.
+    ResolveDispute(IndexerResolveDispute),
+    /// `Bounty/BountyExpired`.
+    CancelBounty(IndexerCancelBounty),
     /// Catch-all. Either no events were emitted (e.g. a no-op tx), or
     /// the events present don't match any kind the parser knows. The
     /// indexer writes this as `kind = "unknown"` with the raw event
@@ -176,6 +194,43 @@ pub struct IndexerSubmitAttestation {
     pub submitter: String,
     /// Number of signatures included with the submission.
     pub signature_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexerPostBounty {
+    pub bounty_id: String,
+    pub poster: String,
+    pub pool_amount_nano: String,
+    pub pool_token_id: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexerClaimBounty {
+    pub bounty_id: String,
+    pub attestation_id: String,
+    pub payout_amount_nano: String,
+    pub payout_token_id: String,
+    pub attester: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexerDisputeAttestation {
+    pub bounty_id: String,
+    pub attestation_id: String,
+    pub disputer: String,
+    pub bond_amount_nano: String,
+    pub bond_token_id: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexerResolveDispute {
+    pub bounty_id: String,
+    pub attestation_id: String,
+    pub decision: String,
+    pub bond_recipient: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexerCancelBounty {
+    pub bounty_id: String,
+    pub refunded_amount_nano: String,
+    pub refunded_token_id: String,
 }
 
 /// Classify a `LedgerTx` plus its emitted events into an [`IndexerTx`].
@@ -321,6 +376,78 @@ fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
                             );
                         }
                     }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for ev in events {
+        match ev.key.as_str() {
+            KEY_BOUNTY_POSTED => {
+                if let Ok(payload) =
+                    serde_json::from_value::<BountyBountyPostedEvent>(ev.value.clone())
+                {
+                    let d = payload.bounty_posted;
+                    return IndexerTx::PostBounty(IndexerPostBounty {
+                        bounty_id: d.bounty_id,
+                        poster: d.poster,
+                        pool_amount_nano: d.pool.amount,
+                        pool_token_id: d.pool.token_id,
+                    });
+                }
+            }
+            KEY_BOUNTY_CLAIMED => {
+                if let Ok(payload) =
+                    serde_json::from_value::<BountyBountyClaimedEvent>(ev.value.clone())
+                {
+                    let d = payload.bounty_claimed;
+                    return IndexerTx::ClaimBounty(IndexerClaimBounty {
+                        bounty_id: d.bounty_id,
+                        attestation_id: d.attestation_id,
+                        payout_amount_nano: d.payout.amount,
+                        payout_token_id: d.payout.token_id,
+                        attester: d.attester,
+                    });
+                }
+            }
+            KEY_BOUNTY_DISPUTED => {
+                if let Ok(payload) =
+                    serde_json::from_value::<BountyBountyDisputedEvent>(ev.value.clone())
+                {
+                    let d = payload.bounty_disputed;
+                    return IndexerTx::DisputeAttestation(IndexerDisputeAttestation {
+                        bounty_id: d.bounty_id,
+                        attestation_id: d.attestation_id,
+                        disputer: d.disputer,
+                        bond_amount_nano: d.bond.amount,
+                        bond_token_id: d.bond.token_id,
+                    });
+                }
+            }
+            KEY_BOUNTY_RESOLVED => {
+                if let Ok(payload) =
+                    serde_json::from_value::<BountyDisputeResolvedEvent>(ev.value.clone())
+                {
+                    let d = payload.dispute_resolved;
+                    return IndexerTx::ResolveDispute(IndexerResolveDispute {
+                        bounty_id: d.bounty_id,
+                        attestation_id: d.attestation_id,
+                        decision: d.decision,
+                        bond_recipient: d.bond_recipient,
+                    });
+                }
+            }
+            KEY_BOUNTY_EXPIRED => {
+                if let Ok(payload) =
+                    serde_json::from_value::<BountyBountyExpiredEvent>(ev.value.clone())
+                {
+                    let d = payload.bounty_expired;
+                    return IndexerTx::CancelBounty(IndexerCancelBounty {
+                        bounty_id: d.bounty_id,
+                        refunded_amount_nano: d.refunded_to_poster.amount,
+                        refunded_token_id: d.refunded_to_poster.token_id,
+                    });
                 }
             }
             _ => {}
@@ -681,6 +808,119 @@ mod tests {
         let tx = fixture_tx("successful");
         let classified = classify_tx(&tx, &[&semantic, &fee]).expect("not skipped");
         assert!(matches!(classified.kind, IndexerTx::RegisterSchema(_)));
+    }
+
+
+    #[test]
+    fn classify_recognises_bounty_posted_before_fee_transfer() {
+        let bounty = LedgerEvent {
+            r#type: "event".into(),
+            number: 1,
+            key: KEY_BOUNTY_POSTED.into(),
+            value: serde_json::json!({
+                "BountyPosted": {
+                    "bounty_id": "lbo1abc",
+                    "poster": "lig1poster",
+                    "pool": {"amount": "100000000", "token_id": "token_1lgt"}
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Bounty".into(),
+            },
+            tx_hash: "ltx1abc".into(),
+        };
+        let fee = LedgerEvent {
+            r#type: "event".into(),
+            number: 2,
+            key: KEY_BANK_TOKEN_TRANSFERRED.into(),
+            value: serde_json::json!({
+                "token_transferred": {
+                    "from": {"user": "lig1poster"},
+                    "to":   {"user": "lig1escrow"},
+                    "coins": {"amount": "100000000", "token_id": "token_1lgt"}
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Bank".into(),
+            },
+            tx_hash: "ltx1abc".into(),
+        };
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&bounty, &fee]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::PostBounty(d) => {
+                assert_eq!(d.bounty_id, "lbo1abc");
+                assert_eq!(d.poster, "lig1poster");
+                assert_eq!(d.pool_amount_nano, "100000000");
+                assert_eq!(d.pool_token_id, "token_1lgt");
+            }
+            other => panic!("expected PostBounty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_bounty_claimed_disputed_resolved_expired() {
+        let cases = [
+            (
+                KEY_BOUNTY_CLAIMED,
+                serde_json::json!({"BountyClaimed": {
+                    "bounty_id": "lbo1abc", "attestation_id": "lat1att",
+                    "payout": {"amount": "42", "token_id": "token_1lgt"},
+                    "attester": "lig1attester"
+                }}),
+                "claim",
+            ),
+            (
+                KEY_BOUNTY_DISPUTED,
+                serde_json::json!({"BountyDisputed": {
+                    "bounty_id": "lbo1abc", "attestation_id": "lat1att",
+                    "disputer": "lig1disputer",
+                    "bond": {"amount": "7", "token_id": "token_1lgt"}
+                }}),
+                "dispute",
+            ),
+            (
+                KEY_BOUNTY_RESOLVED,
+                serde_json::json!({"DisputeResolved": {
+                    "bounty_id": "lbo1abc", "attestation_id": "lat1att",
+                    "decision": "accepted", "bond_recipient": "lig1winner"
+                }}),
+                "resolve",
+            ),
+            (
+                KEY_BOUNTY_EXPIRED,
+                serde_json::json!({"BountyExpired": {
+                    "bounty_id": "lbo1abc",
+                    "refunded_to_poster": {"amount": "13", "token_id": "token_1lgt"}
+                }}),
+                "expire",
+            ),
+        ];
+
+        for (key, value, expected) in cases {
+            let event = LedgerEvent {
+                r#type: "event".into(),
+                number: 1,
+                key: key.into(),
+                value,
+                module: ligate_api_types::ModuleRef {
+                    r#type: "moduleRef".into(),
+                    name: "Bounty".into(),
+                },
+                tx_hash: "ltx1abc".into(),
+            };
+            let tx = fixture_tx("successful");
+            let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+            match (expected, classified.kind) {
+                ("claim", IndexerTx::ClaimBounty(d)) => assert_eq!(d.attester, "lig1attester"),
+                ("dispute", IndexerTx::DisputeAttestation(d)) => assert_eq!(d.disputer, "lig1disputer"),
+                ("resolve", IndexerTx::ResolveDispute(d)) => assert_eq!(d.bond_recipient, "lig1winner"),
+                ("expire", IndexerTx::CancelBounty(d)) => assert_eq!(d.refunded_amount_nano, "13"),
+                (_, other) => panic!("unexpected bounty classification: {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -671,6 +671,107 @@ pub struct AttestationSubmittedDetails {
     pub signature_count: u32,
 }
 
+// ---- Bounty module event payloads ------------------------------------------
+
+/// Payload of `Bounty/BountyPosted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyBountyPostedEvent {
+    /// Inner externally-tagged bounty event payload.
+    #[serde(rename = "BountyPosted")]
+    pub bounty_posted: BountyPostedDetails,
+}
+
+/// Inner fields of `Bounty/BountyPosted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyPostedDetails {
+    /// Chain bounty id.
+    pub bounty_id: String,
+    /// Address that posted/funded the bounty.
+    pub poster: String,
+    /// Bounty pool amount and token.
+    pub pool: Coins,
+}
+
+/// Payload of `Bounty/BountyClaimed`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyBountyClaimedEvent {
+    /// Inner externally-tagged bounty event payload.
+    #[serde(rename = "BountyClaimed")]
+    pub bounty_claimed: BountyClaimedDetails,
+}
+
+/// Inner fields of `Bounty/BountyClaimed`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyClaimedDetails {
+    /// Chain bounty id.
+    pub bounty_id: String,
+    /// Attestation id accepted for this claim.
+    pub attestation_id: String,
+    /// Paid amount and token.
+    pub payout: Coins,
+    /// Attester address receiving the payout.
+    pub attester: String,
+}
+
+/// Payload of `Bounty/BountyDisputed`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyBountyDisputedEvent {
+    /// Inner externally-tagged bounty event payload.
+    #[serde(rename = "BountyDisputed")]
+    pub bounty_disputed: BountyDisputedDetails,
+}
+
+/// Inner fields of `Bounty/BountyDisputed`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyDisputedDetails {
+    /// Chain bounty id.
+    pub bounty_id: String,
+    /// Disputed attestation id.
+    pub attestation_id: String,
+    /// Address that opened the dispute.
+    pub disputer: String,
+    /// Dispute bond amount and token.
+    pub bond: Coins,
+}
+
+/// Payload of `Bounty/DisputeResolved`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyDisputeResolvedEvent {
+    /// Inner externally-tagged bounty event payload.
+    #[serde(rename = "DisputeResolved")]
+    pub dispute_resolved: BountyDisputeResolvedDetails,
+}
+
+/// Inner fields of `Bounty/DisputeResolved`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyDisputeResolvedDetails {
+    /// Chain bounty id.
+    pub bounty_id: String,
+    /// Disputed attestation id.
+    pub attestation_id: String,
+    /// Chain dispute decision string.
+    pub decision: String,
+    /// Address receiving the dispute bond.
+    pub bond_recipient: String,
+}
+
+/// Payload of `Bounty/BountyExpired`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyBountyExpiredEvent {
+    /// Inner externally-tagged bounty event payload.
+    #[serde(rename = "BountyExpired")]
+    pub bounty_expired: BountyExpiredDetails,
+}
+
+/// Inner fields of `Bounty/BountyExpired`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyExpiredDetails {
+    /// Chain bounty id.
+    pub bounty_id: String,
+    /// Amount and token refunded to the poster.
+    pub refunded_to_poster: Coins,
+}
+
 /// `(amount, token_id)` pair as emitted by the bank module.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Coins {
