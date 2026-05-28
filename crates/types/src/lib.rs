@@ -681,6 +681,193 @@ pub struct Coins {
 }
 
 // ============================================================================
+// Bounty module (`/v1/modules/bounty/...`)
+// ============================================================================
+
+/// `GET /v1/modules/bounty/bounties/{id}` body.
+///
+/// The indexer hydrates this after seeing any `Bounty/*` event, since
+/// those events are thin (id + amounts only) and don't carry the full
+/// bounty record. The inner [`BountyRecord`] is the authoritative
+/// source for the static fields (board schema, per-attestation payout,
+/// acceptance predicate, expiry, dispute window) AND the live `status`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyResponse {
+    /// The bounty record.
+    pub bounty: BountyRecord,
+}
+
+/// One bounty record from chain state. Mirrors the bounty module's
+/// on-chain `Bounty` struct (chain#519, ligate-chain v0.4.0+) closely
+/// enough for the indexer to populate the `bounties` table.
+///
+/// Amounts are u128 decimal strings (JS-compat, same convention as
+/// the bank module's [`Coins::amount`]). Addresses + ids are raw
+/// bech32m strings (NOT the bank module's `{"user": "..."}` wrapper),
+/// matching the bounty module's event serialisation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyRecord {
+    /// Poster address (bech32m `lig1...`). Receives escrow refunds on
+    /// cancel and rejected-dispute bond payouts.
+    pub poster: String,
+    /// Bech32m `lsc1...` of the bounty board schema this bounty
+    /// composes against.
+    pub board_schema_id: String,
+    /// Original pool size at PostBounty time, in AVOW nanos. u128
+    /// decimal string.
+    pub pool: String,
+    /// AVOW paid out per accepted claim, in nanos. u128 decimal string.
+    pub per_attestation: String,
+    /// Acceptance predicate as compact JSON. Mirrors the chain's
+    /// `AcceptancePredicate` enum; the indexer stores it verbatim in
+    /// the `bounties.acceptance` JSONB column.
+    pub acceptance: Value,
+    /// DA-layer block height the bounty expires at.
+    pub expiry_da_height: u64,
+    /// Dispute window in chain blocks.
+    pub dispute_window_blocks: u32,
+    /// Lifecycle state. Chain emits PascalCase
+    /// (`"Open"`/`"Exhausted"`/`"Expired"`/`"Cancelled"`/`"Finalised"`);
+    /// the indexer maps to the lowercase `bounties.status` CHECK enum.
+    pub status: String,
+}
+
+// ---- Bounty module event payloads ------------------------------------------
+//
+// Each variant of the chain's `BountyEvent` serialises via serde's
+// default externally-tagged enum encoding: `{<PascalCaseVariant>:
+// {<fields>}}`. The structs below mirror the chain's bounty-module
+// event shapes for indexing, using the same `#[serde(rename)]` +
+// descriptive-snake_case-field convention as the attestation events
+// above. Addresses + ids are raw bech32m strings; amounts are u128
+// decimal strings.
+//
+// The events are intentionally THIN: they carry only the bounty id
+// (plus per-event extras like attestation id / payout / refund
+// amount). The indexer re-hydrates the full record via
+// [`BountyResponse`] on every event, so these payloads only need the
+// fields that drive per-event deltas (claim accounting, escrow-zeroing).
+
+/// Payload of `Bounty/BountyPosted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyPostedEvent {
+    /// Inner externally-tagged variant. Wire name is the PascalCase
+    /// variant identifier; Rust field name is the descriptive
+    /// snake_case form (see attestation events for the convention).
+    #[serde(rename = "BountyPosted")]
+    pub bounty_posted: BountyPostedDetails,
+}
+
+/// Inner fields of `Bounty/BountyPosted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyPostedDetails {
+    /// Bech32m `lbt1...` deterministic bounty id.
+    pub bounty_id: String,
+    /// Poster address (raw bech32m `lig1...`).
+    pub poster: String,
+    /// Initial escrow pool, u128 decimal string.
+    pub pool: String,
+}
+
+/// Payload of `Bounty/BountyClaimed`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyClaimedEvent {
+    /// Inner externally-tagged variant. See [`BountyPostedEvent`] for
+    /// the wire-vs-Rust naming convention.
+    #[serde(rename = "BountyClaimed")]
+    pub bounty_claimed: BountyClaimedDetails,
+}
+
+/// Inner fields of `Bounty/BountyClaimed`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyClaimedDetails {
+    /// Bech32m `lbt1...` bounty id.
+    pub bounty_id: String,
+    /// Bech32m `lat1...` attestation id that satisfied the claim.
+    pub attestation_id: String,
+    /// Payout for this claim, u128 decimal string.
+    pub payout: String,
+    /// Attester address paid out (raw bech32m `lig1...`).
+    pub attester: String,
+}
+
+/// Payload of `Bounty/BountyDisputed`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyDisputedEvent {
+    /// Inner externally-tagged variant. See [`BountyPostedEvent`].
+    #[serde(rename = "BountyDisputed")]
+    pub bounty_disputed: BountyDisputedDetails,
+}
+
+/// Inner fields of `Bounty/BountyDisputed`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyDisputedDetails {
+    /// Bech32m `lbt1...` bounty id.
+    pub bounty_id: String,
+    /// Bech32m `lat1...` attestation id under dispute.
+    pub attestation_id: String,
+    /// Disputer address (raw bech32m `lig1...`).
+    pub disputer: String,
+    /// Dispute bond posted, u128 decimal string.
+    pub bond: String,
+}
+
+/// Payload of `Bounty/DisputeResolved`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DisputeResolvedEvent {
+    /// Inner externally-tagged variant. See [`BountyPostedEvent`].
+    #[serde(rename = "DisputeResolved")]
+    pub dispute_resolved: DisputeResolvedDetails,
+}
+
+/// Inner fields of `Bounty/DisputeResolved`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DisputeResolvedDetails {
+    /// Bech32m `lbt1...` bounty id.
+    pub bounty_id: String,
+    /// Bech32m `lat1...` attestation id the dispute targeted.
+    pub attestation_id: String,
+    /// Resolution decision: `"Accept"` or `"Reject"`.
+    pub decision: String,
+    /// Address that received the bond (raw bech32m `lig1...`).
+    pub bond_recipient: String,
+}
+
+/// Payload of `Bounty/BountyExpired`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyExpiredEvent {
+    /// Inner externally-tagged variant. See [`BountyPostedEvent`].
+    #[serde(rename = "BountyExpired")]
+    pub bounty_expired: BountyExpiredDetails,
+}
+
+/// Inner fields of `Bounty/BountyExpired`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyExpiredDetails {
+    /// Bech32m `lbt1...` bounty id.
+    pub bounty_id: String,
+    /// Amount refunded to the poster, u128 decimal string.
+    pub refunded_to_poster: String,
+}
+
+/// Payload of `Bounty/BountyFinalised`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyFinalisedEvent {
+    /// Inner externally-tagged variant. See [`BountyPostedEvent`].
+    #[serde(rename = "BountyFinalised")]
+    pub bounty_finalised: BountyFinalisedDetails,
+}
+
+/// Inner fields of `Bounty/BountyFinalised`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BountyFinalisedDetails {
+    /// Bech32m `lbt1...` bounty id.
+    pub bounty_id: String,
+    /// Residual escrow swept back to the poster, u128 decimal string.
+    pub swept_to_poster: String,
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -728,6 +915,74 @@ mod tests {
         let parsed: AttestorSetResponse = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.attestor_set.members.len(), 3);
         assert_eq!(parsed.attestor_set.threshold, 2);
+    }
+
+    #[test]
+    fn bounty_response_round_trip() {
+        // Chain emits PascalCase `status` and u128 amounts as strings;
+        // `acceptance` is a pass-through JSON object.
+        let body = r#"{
+            "bounty": {
+                "poster": "lig1poster",
+                "board_schema_id": "lsc1board",
+                "pool": "5000000000",
+                "per_attestation": "1000000000",
+                "acceptance": {"Any": {}},
+                "expiry_da_height": 123456,
+                "dispute_window_blocks": 100,
+                "status": "Open"
+            }
+        }"#;
+        let parsed: BountyResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.bounty.poster, "lig1poster");
+        assert_eq!(parsed.bounty.board_schema_id, "lsc1board");
+        assert_eq!(parsed.bounty.pool, "5000000000");
+        assert_eq!(parsed.bounty.per_attestation, "1000000000");
+        assert_eq!(parsed.bounty.expiry_da_height, 123456);
+        assert_eq!(parsed.bounty.dispute_window_blocks, 100);
+        assert_eq!(parsed.bounty.status, "Open");
+        assert_eq!(parsed.bounty.acceptance["Any"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn bounty_event_payloads_round_trip() {
+        // Externally-tagged enum encoding: PascalCase variant key, raw
+        // bech32m addresses (no `{"user": ...}` wrapper), u128 strings.
+        let posted: BountyPostedEvent = serde_json::from_value(serde_json::json!({
+            "BountyPosted": {
+                "bounty_id": "lbt1abc",
+                "poster": "lig1poster",
+                "pool": "5000000000"
+            }
+        }))
+        .unwrap();
+        assert_eq!(posted.bounty_posted.bounty_id, "lbt1abc");
+        assert_eq!(posted.bounty_posted.pool, "5000000000");
+
+        let claimed: BountyClaimedEvent = serde_json::from_value(serde_json::json!({
+            "BountyClaimed": {
+                "bounty_id": "lbt1abc",
+                "attestation_id": "lat1xyz",
+                "payout": "1000000000",
+                "attester": "lig1attester"
+            }
+        }))
+        .unwrap();
+        assert_eq!(claimed.bounty_claimed.bounty_id, "lbt1abc");
+        assert_eq!(claimed.bounty_claimed.payout, "1000000000");
+        assert_eq!(claimed.bounty_claimed.attester, "lig1attester");
+
+        let expired: BountyExpiredEvent = serde_json::from_value(serde_json::json!({
+            "BountyExpired": { "bounty_id": "lbt1abc", "refunded_to_poster": "4000000000" }
+        }))
+        .unwrap();
+        assert_eq!(expired.bounty_expired.refunded_to_poster, "4000000000");
+
+        let finalised: BountyFinalisedEvent = serde_json::from_value(serde_json::json!({
+            "BountyFinalised": { "bounty_id": "lbt1abc", "swept_to_poster": "0" }
+        }))
+        .unwrap();
+        assert_eq!(finalised.bounty_finalised.swept_to_poster, "0");
     }
 
     #[test]

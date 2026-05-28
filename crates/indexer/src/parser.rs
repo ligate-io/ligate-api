@@ -37,11 +37,26 @@
 
 use ligate_api_types::{
     AttestationAttestationSubmittedEvent, AttestationAttestorSetRegisteredEvent,
-    AttestationSchemaRegisteredEvent, BankTokenTransferredEvent, LedgerEvent, LedgerTx,
+    AttestationSchemaRegisteredEvent, BankTokenTransferredEvent, BountyClaimedEvent,
+    BountyDisputedEvent, BountyExpiredEvent, BountyFinalisedEvent, BountyPostedEvent,
+    DisputeResolvedEvent, LedgerEvent, LedgerTx,
 };
 
 /// Event-key constant for the Bank module's `TokenTransferred` event.
 const KEY_BANK_TOKEN_TRANSFERRED: &str = "Bank/TokenTransferred";
+
+/// Event keys emitted by the Bounty module (chain#519, ligate-chain
+/// v0.4.0+). The bounty module reports its `Display` name as plain
+/// `Bounty` (like the bank module overrides to `Bank`), so the prefix
+/// is `Bounty/` rather than `BountyModule/`. The strings match the
+/// auto-generated `"<Module>/<VariantName>"` form the SDK's
+/// `emit_event` produces.
+const KEY_BOUNTY_POSTED: &str = "Bounty/BountyPosted";
+const KEY_BOUNTY_CLAIMED: &str = "Bounty/BountyClaimed";
+const KEY_BOUNTY_DISPUTED: &str = "Bounty/BountyDisputed";
+const KEY_BOUNTY_DISPUTE_RESOLVED: &str = "Bounty/DisputeResolved";
+const KEY_BOUNTY_EXPIRED: &str = "Bounty/BountyExpired";
+const KEY_BOUNTY_FINALISED: &str = "Bounty/BountyFinalised";
 
 /// Event keys emitted by the Attestation module's three CallMessage
 /// paths (ligate-chain PR #297). The strings match the auto-generated
@@ -100,11 +115,56 @@ pub enum IndexerTx {
     /// `Attestation/AttestationSubmitted`. Mirrors RFC 0002's
     /// `details` shape for `kind = "submit_attestation"`.
     SubmitAttestation(IndexerSubmitAttestation),
+    /// A `Bounty/*` lifecycle event. Carries the affected bounty id
+    /// plus a [`BountyEventKind`] discriminator the ingest step uses to
+    /// decide which per-event delta to apply on top of the
+    /// re-hydrated record. See [`BountyEventKind`] for why the kind is
+    /// "first bounty event in the tx" + summed claim accounting.
+    BountyEvent {
+        /// Bech32m `lbt1...` id of the bounty the tx touched.
+        bounty_id: String,
+        /// What happened to the bounty in this tx.
+        kind: BountyEventKind,
+    },
     /// Catch-all. Either no events were emitted (e.g. a no-op tx), or
     /// the events present don't match any kind the parser knows. The
     /// indexer writes this as `kind = "unknown"` with the raw event
     /// keys captured in `details.event_keys` for forensic lookups.
     Unknown { event_keys: Vec<String> },
+}
+
+/// Which bounty lifecycle transition a [`IndexerTx::BountyEvent`]
+/// represents.
+///
+/// **Batch claims.** A single `ClaimBounty` tx can emit multiple
+/// `Bounty/BountyClaimed` events (one per attestation claimed in the
+/// batch). Rather than emit one `BountyEvent` per claim, the parser
+/// collapses them into a single `Claimed` carrying `count` (number of
+/// `BountyClaimed` events in the tx) and `total_payout` (their summed
+/// payouts), so the ingest step can decrement escrow and bump
+/// `claim_count` correctly in one pass. The hydrate re-reads the
+/// authoritative `status` regardless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BountyEventKind {
+    /// `Bounty/BountyPosted`.
+    Posted,
+    /// One or more `Bounty/BountyClaimed` in the same tx.
+    Claimed {
+        /// Number of `BountyClaimed` events in the tx (>= 1).
+        count: u32,
+        /// Sum of the `payout` fields across those events, as a u128
+        /// decimal string. Postgres numeric arithmetic decrements
+        /// `escrow_remaining_nano` by this at ingest.
+        total_payout: String,
+    },
+    /// `Bounty/BountyDisputed`.
+    Disputed,
+    /// `Bounty/DisputeResolved`.
+    DisputeResolved,
+    /// `Bounty/BountyExpired`.
+    Expired,
+    /// `Bounty/BountyFinalised`.
+    Finalised,
 }
 
 /// Decoded transfer details. Mirrors RFC 0002's `Tx.details` shape for
@@ -227,20 +287,23 @@ pub struct ClassifiedTx {
 ///
 /// Order of preference (first match wins):
 ///
-/// 1. `Bank/TokenTransferred` -> [`IndexerTx::Transfer`]
-/// 2. `Attestation/AttestorSetRegistered` -> [`IndexerTx::RegisterAttestorSet`]
-/// 3. `Attestation/SchemaRegistered`      -> [`IndexerTx::RegisterSchema`]
-/// 4. `Attestation/AttestationSubmitted`  -> [`IndexerTx::SubmitAttestation`]
-/// 5. otherwise -> [`IndexerTx::Unknown`] capturing the event keys
+/// 1. `Attestation/AttestorSetRegistered` -> [`IndexerTx::RegisterAttestorSet`]
+/// 2. `Attestation/SchemaRegistered`      -> [`IndexerTx::RegisterSchema`]
+/// 3. `Attestation/AttestationSubmitted`  -> [`IndexerTx::SubmitAttestation`]
+/// 4. any `Bounty/*` event                -> [`IndexerTx::BountyEvent`]
+/// 5. `Bank/TokenTransferred`             -> [`IndexerTx::Transfer`]
+/// 6. otherwise -> [`IndexerTx::Unknown`] capturing the event keys
 ///    we saw, for forensic lookup
 ///
-/// **Attestation events win over Bank events.** A `register_schema`
-/// tx emits both an `Attestation/SchemaRegistered` (semantic) and a
-/// `Bank/TokenTransferred` (the fee payment to treasury); without
-/// this preference the parser would classify the tx as a Transfer
-/// of the fee, dropping the semantic event. We walk events looking
-/// for an Attestation-module key first; only if none is found do we
-/// fall through to the bank check.
+/// **Semantic events win over Bank events.** A `register_schema` tx
+/// emits both an `Attestation/SchemaRegistered` (semantic) and a
+/// `Bank/TokenTransferred` (the fee payment to treasury); a
+/// `PostBounty` tx emits a `Bounty/BountyPosted` AND a
+/// `Bank/TokenTransferred` for the escrow deposit. Without the
+/// preference the parser would classify either as a Transfer of the
+/// fee/escrow, dropping the semantic event. We walk events looking
+/// for Attestation- then Bounty-module keys first; only if none is
+/// found do we fall through to the bank check.
 fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
     // Pass 1: look for an Attestation-module event. These are the
     // semantic events for the register/submit call types.
@@ -327,7 +390,20 @@ fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
         }
     }
 
-    // Pass 2: no semantic event matched; fall back to the bank check
+    // Pass 2: look for Bounty-module events. These are semantic events
+    // for the bounty CallMessage paths and win over the
+    // `Bank/TokenTransferred` a PostBounty / refund tx also emits.
+    //
+    // A batch `ClaimBounty` can emit multiple `BountyClaimed` events in
+    // one tx. We collect them: take the first bounty event's id + kind
+    // as the representative classification, but for claims also sum the
+    // payouts and count the events so the ingest step can apply the
+    // batch's escrow decrement + claim_count bump in one shot.
+    if let Some(bounty) = classify_bounty_events(events) {
+        return bounty;
+    }
+
+    // Pass 3: no semantic event matched; fall back to the bank check
     // for plain transfers.
     for ev in events {
         if ev.key == KEY_BANK_TOKEN_TRANSFERRED {
@@ -352,6 +428,99 @@ fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
     IndexerTx::Unknown {
         event_keys: events.iter().map(|e| e.key.clone()).collect(),
     }
+}
+
+/// Scan `events` for `Bounty/*` keys and, if any are present, collapse
+/// them into a single [`IndexerTx::BountyEvent`].
+///
+/// Returns `None` when no bounty event is present (caller falls
+/// through to the bank check). The bounty id and discriminator come
+/// from the FIRST recognised bounty event in the tx; the ingest step
+/// re-hydrates the full record by id, so a single representative
+/// classification is enough for everything except claim accounting.
+///
+/// **Claim accounting.** A batch `ClaimBounty` emits one
+/// `BountyClaimed` per attestation. We sum every `BountyClaimed`
+/// payout in the tx into `total_payout` and count them into `count`,
+/// regardless of which bounty event happened to be first — in
+/// practice a tx touches a single bounty, so all `BountyClaimed`
+/// events share the same `bounty_id`. If a future chain rev batches
+/// claims across multiple bounties in one tx, this would under-count;
+/// that's flagged as a v1 limitation (the per-bounty hydrate still
+/// fixes `status`, only the escrow delta would be approximate).
+fn classify_bounty_events(events: &[&LedgerEvent]) -> Option<IndexerTx> {
+    // First recognised bounty event drives id + kind. We decode lazily
+    // and tolerate a malformed payload by skipping that event (the tx
+    // falls through to Unknown if NO bounty event decodes), matching
+    // the never-crash-mid-slot policy of the attestation path.
+    let mut first: Option<(String, BountyEventKind)> = None;
+    // Claim tally, summed across every BountyClaimed in the tx.
+    let mut claim_count: u32 = 0;
+    let mut claim_total = 0u128;
+    let mut saw_claim = false;
+
+    for ev in events {
+        match ev.key.as_str() {
+            KEY_BOUNTY_POSTED => {
+                if let Ok(p) = serde_json::from_value::<BountyPostedEvent>(ev.value.clone()) {
+                    first.get_or_insert((p.bounty_posted.bounty_id, BountyEventKind::Posted));
+                }
+            }
+            KEY_BOUNTY_CLAIMED => {
+                if let Ok(p) = serde_json::from_value::<BountyClaimedEvent>(ev.value.clone()) {
+                    let d = p.bounty_claimed;
+                    claim_count += 1;
+                    saw_claim = true;
+                    // Sum payouts in u128; a malformed/overflowing
+                    // amount is skipped from the sum but still counted
+                    // (the hydrate-driven status refresh is unaffected).
+                    if let Ok(v) = d.payout.parse::<u128>() {
+                        claim_total = claim_total.saturating_add(v);
+                    }
+                    // Placeholder kind; replaced by the summed Claimed
+                    // below once we've walked every event.
+                    first.get_or_insert((d.bounty_id, BountyEventKind::Posted));
+                }
+            }
+            KEY_BOUNTY_DISPUTED => {
+                if let Ok(p) = serde_json::from_value::<BountyDisputedEvent>(ev.value.clone()) {
+                    first.get_or_insert((p.bounty_disputed.bounty_id, BountyEventKind::Disputed));
+                }
+            }
+            KEY_BOUNTY_DISPUTE_RESOLVED => {
+                if let Ok(p) = serde_json::from_value::<DisputeResolvedEvent>(ev.value.clone()) {
+                    first.get_or_insert((
+                        p.dispute_resolved.bounty_id,
+                        BountyEventKind::DisputeResolved,
+                    ));
+                }
+            }
+            KEY_BOUNTY_EXPIRED => {
+                if let Ok(p) = serde_json::from_value::<BountyExpiredEvent>(ev.value.clone()) {
+                    first.get_or_insert((p.bounty_expired.bounty_id, BountyEventKind::Expired));
+                }
+            }
+            KEY_BOUNTY_FINALISED => {
+                if let Ok(p) = serde_json::from_value::<BountyFinalisedEvent>(ev.value.clone()) {
+                    first.get_or_insert((p.bounty_finalised.bounty_id, BountyEventKind::Finalised));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (bounty_id, kind) = first?;
+    // If any BountyClaimed was seen, the tx is a claim regardless of
+    // which event sorted first — promote to the summed Claimed kind.
+    let kind = if saw_claim {
+        BountyEventKind::Claimed {
+            count: claim_count,
+            total_payout: claim_total.to_string(),
+        }
+    } else {
+        kind
+    };
+    Some(IndexerTx::BountyEvent { bounty_id, kind })
 }
 
 #[cfg(test)]
@@ -681,6 +850,265 @@ mod tests {
         let tx = fixture_tx("successful");
         let classified = classify_tx(&tx, &[&semantic, &fee]).expect("not skipped");
         assert!(matches!(classified.kind, IndexerTx::RegisterSchema(_)));
+    }
+
+    // ---- bounty events -----------------------------------------------------
+
+    /// Build a `Bounty/<variant>` ledger event with the given key +
+    /// externally-tagged value. Mirrors the inline event construction
+    /// the attestation tests use; factored out because the bounty
+    /// suite builds several.
+    fn bounty_event(number: u64, key: &str, value: serde_json::Value) -> LedgerEvent {
+        LedgerEvent {
+            r#type: "event".into(),
+            number,
+            key: key.into(),
+            value,
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Bounty".into(),
+            },
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_bounty_posted() {
+        // Externally-tagged enum: PascalCase variant key, raw bech32m
+        // addresses (NOT the bank `{"user": ...}` wrapper), u128 string
+        // amounts. The constants + serde renames encode that shape.
+        let event = bounty_event(
+            1,
+            KEY_BOUNTY_POSTED,
+            serde_json::json!({
+                "BountyPosted": {
+                    "bounty_id": "lbt1abc",
+                    "poster": "lig1poster",
+                    "pool": "5000000000"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::BountyEvent { bounty_id, kind } => {
+                assert_eq!(bounty_id, "lbt1abc");
+                assert_eq!(kind, BountyEventKind::Posted);
+            }
+            other => panic!("expected BountyEvent::Posted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_bounty_claimed() {
+        let event = bounty_event(
+            1,
+            KEY_BOUNTY_CLAIMED,
+            serde_json::json!({
+                "BountyClaimed": {
+                    "bounty_id": "lbt1abc",
+                    "attestation_id": "lat1xyz",
+                    "payout": "1000000000",
+                    "attester": "lig1attester"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::BountyEvent { bounty_id, kind } => {
+                assert_eq!(bounty_id, "lbt1abc");
+                assert_eq!(
+                    kind,
+                    BountyEventKind::Claimed {
+                        count: 1,
+                        total_payout: "1000000000".into(),
+                    }
+                );
+            }
+            other => panic!("expected BountyEvent::Claimed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_bounty_disputed() {
+        let event = bounty_event(
+            1,
+            KEY_BOUNTY_DISPUTED,
+            serde_json::json!({
+                "BountyDisputed": {
+                    "bounty_id": "lbt1abc",
+                    "attestation_id": "lat1xyz",
+                    "disputer": "lig1disputer",
+                    "bond": "250000000"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::BountyEvent { bounty_id, kind } => {
+                assert_eq!(bounty_id, "lbt1abc");
+                assert_eq!(kind, BountyEventKind::Disputed);
+            }
+            other => panic!("expected BountyEvent::Disputed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_dispute_resolved() {
+        let event = bounty_event(
+            1,
+            KEY_BOUNTY_DISPUTE_RESOLVED,
+            serde_json::json!({
+                "DisputeResolved": {
+                    "bounty_id": "lbt1abc",
+                    "attestation_id": "lat1xyz",
+                    "decision": "Accept",
+                    "bond_recipient": "lig1disputer"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::BountyEvent { bounty_id, kind } => {
+                assert_eq!(bounty_id, "lbt1abc");
+                assert_eq!(kind, BountyEventKind::DisputeResolved);
+            }
+            other => panic!("expected BountyEvent::DisputeResolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_bounty_expired() {
+        let event = bounty_event(
+            1,
+            KEY_BOUNTY_EXPIRED,
+            serde_json::json!({
+                "BountyExpired": { "bounty_id": "lbt1abc", "refunded_to_poster": "4000000000" }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::BountyEvent { bounty_id, kind } => {
+                assert_eq!(bounty_id, "lbt1abc");
+                assert_eq!(kind, BountyEventKind::Expired);
+            }
+            other => panic!("expected BountyEvent::Expired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_bounty_finalised() {
+        let event = bounty_event(
+            1,
+            KEY_BOUNTY_FINALISED,
+            serde_json::json!({
+                "BountyFinalised": { "bounty_id": "lbt1abc", "swept_to_poster": "0" }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::BountyEvent { bounty_id, kind } => {
+                assert_eq!(bounty_id, "lbt1abc");
+                assert_eq!(kind, BountyEventKind::Finalised);
+            }
+            other => panic!("expected BountyEvent::Finalised, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_batch_claim_sums_payouts_and_counts() {
+        // A batch ClaimBounty emits one BountyClaimed per attestation.
+        // The parser collapses them into a single Claimed carrying the
+        // event count + summed payouts, so the ingest step can apply
+        // the escrow decrement and claim_count bump in one pass.
+        let claim1 = bounty_event(
+            1,
+            KEY_BOUNTY_CLAIMED,
+            serde_json::json!({
+                "BountyClaimed": {
+                    "bounty_id": "lbt1abc",
+                    "attestation_id": "lat1one",
+                    "payout": "1000000000",
+                    "attester": "lig1a"
+                }
+            }),
+        );
+        let claim2 = bounty_event(
+            2,
+            KEY_BOUNTY_CLAIMED,
+            serde_json::json!({
+                "BountyClaimed": {
+                    "bounty_id": "lbt1abc",
+                    "attestation_id": "lat1two",
+                    "payout": "2500000000",
+                    "attester": "lig1b"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&claim1, &claim2]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::BountyEvent { bounty_id, kind } => {
+                assert_eq!(bounty_id, "lbt1abc");
+                assert_eq!(
+                    kind,
+                    BountyEventKind::Claimed {
+                        count: 2,
+                        total_payout: "3500000000".into(),
+                    }
+                );
+            }
+            other => panic!("expected batched BountyEvent::Claimed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bounty_event_wins_over_bank_escrow_transfer() {
+        // A PostBounty tx emits BOTH a Bounty/BountyPosted (semantic)
+        // AND a Bank/TokenTransferred for the escrow deposit. The
+        // parser must pick the bounty event, not the escrow transfer.
+        let semantic = bounty_event(
+            1,
+            KEY_BOUNTY_POSTED,
+            serde_json::json!({
+                "BountyPosted": {
+                    "bounty_id": "lbt1abc",
+                    "poster": "lig1poster",
+                    "pool": "5000000000"
+                }
+            }),
+        );
+        let escrow = LedgerEvent {
+            r#type: "event".into(),
+            number: 2,
+            key: KEY_BANK_TOKEN_TRANSFERRED.into(),
+            value: serde_json::json!({
+                "token_transferred": {
+                    "from": {"user": "lig1poster"},
+                    "to":   {"user": "lig1escrow"},
+                    "coins": {"amount": "5000000000", "token_id": "token_1lgt"}
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Bank".into(),
+            },
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
+        };
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&semantic, &escrow]).expect("not skipped");
+        assert!(matches!(
+            classified.kind,
+            IndexerTx::BountyEvent {
+                kind: BountyEventKind::Posted,
+                ..
+            }
+        ));
     }
 
     #[test]

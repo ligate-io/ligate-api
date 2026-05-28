@@ -21,7 +21,8 @@
 //! - `GET /v1/ledger/slots/{height}` — driver of the backfill loop.
 
 use ligate_api_types::{
-    ChainClusterTopology, LedgerBatch, LedgerEvent, LedgerTx, RollupInfo, SlotResponse,
+    BountyRecord, BountyResponse, ChainClusterTopology, LedgerBatch, LedgerEvent, LedgerTx,
+    RollupInfo, SlotResponse,
 };
 use reqwest::Client as Http;
 use url::Url;
@@ -224,6 +225,37 @@ impl NodeClient {
         })
     }
 
+    /// `GET /v1/modules/bounty/bounties/{id}`. Returns the full bounty
+    /// record by its bech32m `lbt1...` id. `None` on 404 (the chain
+    /// doesn't know that bounty — e.g. the indexer raced ahead of state
+    /// availability, or the id is bad).
+    ///
+    /// The chain wraps the record in a `{"bounty": {...}}` envelope
+    /// (same convention as `SchemaResponse` / `AttestorSetResponse`);
+    /// this unwraps to the inner [`BountyRecord`]. The indexer calls
+    /// this on every `Bounty/*` event to hydrate the authoritative
+    /// status + static fields, since the events themselves are thin.
+    pub async fn bounty_at(&self, id: &str) -> Result<Option<BountyRecord>> {
+        let url = self.url(&format!("v1/modules/bounty/bounties/{id}"));
+        let resp = self
+            .http
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(IndexerError::NodeUnreachable)?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        let bytes = resp.bytes().await.map_err(IndexerError::NodeUnreachable)?;
+        let parsed = serde_json::from_slice::<BountyResponse>(&bytes).map_err(|source| {
+            IndexerError::NodeBadShape {
+                url: url.to_string(),
+                source,
+            }
+        })?;
+        Ok(Some(parsed.bounty))
+    }
+
     /// Build a fully-qualified URL by joining `path` onto `self.base`.
     fn url(&self, path: &str) -> Url {
         // `Url::join` drops the existing path segment unless we've
@@ -383,6 +415,48 @@ mod tests {
             .await;
         let client = NodeClient::new(&srv.url()).unwrap();
         assert!(client.events_for_slot(999).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounty_at_parses_canonical_body() {
+        let mut srv = Server::new_async().await;
+        // `{"bounty": {...}}` envelope; PascalCase status + u128 string
+        // amounts, raw bech32m addresses, pass-through acceptance JSON.
+        let _m = srv
+            .mock("GET", "/v1/modules/bounty/bounties/lbt1abc")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"bounty":{"poster":"lig1poster","board_schema_id":"lsc1board","pool":"5000000000","per_attestation":"1000000000","acceptance":{"Any":{}},"expiry_da_height":123456,"dispute_window_blocks":100,"status":"Open"}}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = NodeClient::new(&srv.url()).unwrap();
+        let rec = client
+            .bounty_at("lbt1abc")
+            .await
+            .unwrap()
+            .expect("bounty present");
+        assert_eq!(rec.poster, "lig1poster");
+        assert_eq!(rec.board_schema_id, "lsc1board");
+        assert_eq!(rec.pool, "5000000000");
+        assert_eq!(rec.per_attestation, "1000000000");
+        assert_eq!(rec.expiry_da_height, 123456);
+        assert_eq!(rec.dispute_window_blocks, 100);
+        assert_eq!(rec.status, "Open");
+    }
+
+    #[tokio::test]
+    async fn bounty_at_returns_none_on_404() {
+        let mut srv = Server::new_async().await;
+        let _m = srv
+            .mock("GET", "/v1/modules/bounty/bounties/lbt1missing")
+            .with_status(404)
+            .create_async()
+            .await;
+        let client = NodeClient::new(&srv.url()).unwrap();
+        assert!(client.bounty_at("lbt1missing").await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@
 //! helpers without touching SQL directly.
 
 use chrono::{DateTime, TimeZone, Utc};
-use ligate_api_types::{RollupInfo, SlotResponse};
+use ligate_api_types::{BountyRecord, RollupInfo, SlotResponse};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -308,6 +308,30 @@ pub async fn insert_transaction(
                 "signature_count": d.signature_count,
             }),
         ),
+        IndexerTx::BountyEvent { bounty_id, kind } => (
+            // One `kind` string for every bounty lifecycle tx; the
+            // specific transition lives in `details.event` so the
+            // explorer can render it without a new top-level kind per
+            // variant. The authoritative bounty state is the `bounties`
+            // table (hydrated separately); `details` here is just the
+            // tx-level forensic record.
+            "bounty_event",
+            {
+                let mut d = serde_json::json!({
+                    "bounty_id": bounty_id,
+                    "event": bounty_event_kind_label(kind),
+                });
+                if let crate::parser::BountyEventKind::Claimed {
+                    count,
+                    total_payout,
+                } = kind
+                {
+                    d["claim_count"] = serde_json::json!(count);
+                    d["total_payout_nano"] = serde_json::json!(total_payout);
+                }
+                d
+            },
+        ),
         IndexerTx::Unknown { event_keys } => (
             "unknown",
             // RFC 0002 reserves `raw_call_disc: [u8, u8]` for the
@@ -352,7 +376,11 @@ pub async fn insert_transaction(
         IndexerTx::RegisterAttestorSet(d) => Some(d.registered_by.as_str()),
         IndexerTx::RegisterSchema(d) => Some(d.owner.as_str()),
         IndexerTx::SubmitAttestation(d) => Some(d.submitter.as_str()),
-        IndexerTx::Unknown { .. } => None,
+        // Bounty events don't carry a clean tx sender in the decoded
+        // shape (the poster/claimant lives in the hydrated record, not
+        // the parser variant); left NULL for Phase 1, same rationale
+        // as `update_address_summaries`.
+        IndexerTx::BountyEvent { .. } | IndexerTx::Unknown { .. } => None,
     };
 
     // Protocol fee: flat per-kind constant from devnet-1's
@@ -372,7 +400,12 @@ pub async fn insert_transaction(
         IndexerTx::RegisterAttestorSet(_) => Some(50_000_000),
         IndexerTx::RegisterSchema(_) => Some(100_000_000),
         IndexerTx::SubmitAttestation(_) => Some(100_000),
-        IndexerTx::Unknown { .. } => None,
+        // Bounty call protocol fees aren't pinned in the genesis table
+        // the other constants come from (the bounty module ships in
+        // ligate-chain v0.4.0+); leave None until the live config is
+        // known rather than guess. The escrow/payout flows are tracked
+        // in the `bounties` table, not this column.
+        IndexerTx::BountyEvent { .. } | IndexerTx::Unknown { .. } => None,
     };
 
     // Gas fee paid: on devnet the chain meters but doesn't bill
@@ -564,6 +597,175 @@ pub async fn insert_attestation(
     .bind(i32::try_from(d.signature_count).unwrap_or(i32::MAX))
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Snake-case label for a [`crate::parser::BountyEventKind`], used as
+/// the `details.event` discriminator on the `transactions` row for a
+/// bounty tx. Mirrors the chain's variant names in a JSON-friendly
+/// casing so explorer clients can switch on it.
+fn bounty_event_kind_label(kind: &crate::parser::BountyEventKind) -> &'static str {
+    use crate::parser::BountyEventKind as K;
+    match kind {
+        K::Posted => "posted",
+        K::Claimed { .. } => "claimed",
+        K::Disputed => "disputed",
+        K::DisputeResolved => "dispute_resolved",
+        K::Expired => "expired",
+        K::Finalised => "finalised",
+    }
+}
+
+/// Map the chain's PascalCase bounty status to the lowercase
+/// `bounties.status` CHECK enum (`'open'`/`'exhausted'`/`'expired'`/
+/// `'cancelled'`/`'finalised'`).
+///
+/// Unknown values (a future chain rev adds a status) fall back to
+/// `'open'` rather than failing the insert — the worst case is the
+/// matching service over-surfaces a bounty that's actually in a new
+/// terminal state, which the chain re-checks at ClaimBounty time. A
+/// new status would be added here in the same PR that adds it to the
+/// CHECK constraint.
+fn map_bounty_status(chain_status: &str) -> &'static str {
+    match chain_status {
+        "Open" => "open",
+        "Exhausted" => "exhausted",
+        "Expired" => "expired",
+        "Cancelled" => "cancelled",
+        "Finalised" => "finalised",
+        _ => "open",
+    }
+}
+
+/// Upsert one row into `bounties` from a hydrated [`BountyRecord`].
+///
+/// Idempotent on (id) primary key. The chain `Bounty/*` events are
+/// thin (id + amounts), so the indexer hydrates the full record via
+/// `NodeClient::bounty_at` and writes it here on EVERY event — Posted
+/// (initial insert) and every subsequent transition (status refresh,
+/// including the Cancelled-vs-Expired disambiguation the events alone
+/// can't make).
+///
+/// **INSERT vs CONFLICT split.** On first insert (a `BountyPosted`)
+/// we seed `escrow_remaining_nano = pool` and `claim_count = 0`. On
+/// CONFLICT (a later event re-hydrating) we refresh only the static
+/// fields + `status`, and deliberately DO NOT touch
+/// `escrow_remaining_nano` / `claim_count` / `last_claim_at_slot` —
+/// those are owned by [`apply_bounty_claim`] / [`set_bounty_escrow_zero`]
+/// and overwriting them here would clobber claim accounting with the
+/// stale pre-event escrow. (The hydrate's `pool` is the ORIGINAL pool,
+/// not the live remaining escrow.)
+///
+/// FK: `board_schema_id` → `schemas(id)`, `posted_at_tx` →
+/// `transactions(hash)`. The bounty board schema must be registered
+/// before a bounty can post against it, and the ingest loop inserts
+/// the tx row before resource rows, so both FKs hold in normal
+/// operation. On FK violation the insert errors and the caller
+/// logs-and-continues.
+pub async fn upsert_bounty(
+    pool: &PgPool,
+    id: &str,
+    record: &BountyRecord,
+    posted_at_slot: u64,
+    posted_at_tx: &str,
+    posted_at_timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let status = map_bounty_status(&record.status);
+
+    sqlx::query(
+        "INSERT INTO bounties (
+            id, poster, board_schema_id, pool_nano, per_attestation_nano,
+            escrow_remaining_nano, status, acceptance, expiry_da_height,
+            dispute_window_blocks, posted_at_slot, posted_at_tx, posted_at_timestamp,
+            claim_count, last_claim_at_slot
+         ) VALUES (
+            $1, $2, $3, $4, $5,
+            -- On first insert escrow starts at the full pool; claim
+            -- accounting (apply_bounty_claim / set_bounty_escrow_zero)
+            -- takes over from there.
+            $4, $6, $7, $8,
+            $9, $10, $11, $12,
+            0, NULL
+         )
+         ON CONFLICT (id) DO UPDATE SET
+            poster                = EXCLUDED.poster,
+            board_schema_id       = EXCLUDED.board_schema_id,
+            pool_nano             = EXCLUDED.pool_nano,
+            per_attestation_nano  = EXCLUDED.per_attestation_nano,
+            -- Status refresh is the whole point of re-hydrating on every
+            -- event. escrow_remaining_nano / claim_count / last_claim_at_slot
+            -- are intentionally NOT in this SET — they're owned by the
+            -- claim + terminal paths and the hydrate's `pool` is the
+            -- original pool, not the live remaining escrow.
+            status                = EXCLUDED.status,
+            acceptance            = EXCLUDED.acceptance,
+            expiry_da_height      = EXCLUDED.expiry_da_height,
+            dispute_window_blocks = EXCLUDED.dispute_window_blocks",
+    )
+    .bind(id)
+    .bind(&record.poster)
+    .bind(&record.board_schema_id)
+    .bind(&record.pool)
+    .bind(&record.per_attestation)
+    .bind(status)
+    .bind(&record.acceptance)
+    .bind(record.expiry_da_height as i64)
+    .bind(i32::try_from(record.dispute_window_blocks).unwrap_or(i32::MAX))
+    .bind(posted_at_slot as i64)
+    .bind(posted_at_tx)
+    .bind(posted_at_timestamp)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Apply a (possibly batched) `ClaimBounty` to a bounty row:
+/// decrement the remaining escrow by `total_payout`, bump
+/// `claim_count` by `count`, and stamp `last_claim_at_slot`.
+///
+/// The escrow + payout columns are TEXT (u128-as-string), so the
+/// arithmetic casts through Postgres `numeric` and back to text. A
+/// no-op if the bounty row doesn't exist yet (the upsert from the
+/// same event's hydrate should have created it first; the ingest loop
+/// orders the upsert before this call).
+///
+/// `total_payout` is a u128 decimal string; `count` is the number of
+/// `BountyClaimed` events the tx emitted (see
+/// [`crate::parser::BountyEventKind::Claimed`]).
+pub async fn apply_bounty_claim(
+    pool: &PgPool,
+    id: &str,
+    total_payout: &str,
+    count: i32,
+    slot: u64,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE bounties
+         SET escrow_remaining_nano = (escrow_remaining_nano::numeric - $2::numeric)::text,
+             claim_count           = claim_count + $3,
+             last_claim_at_slot    = $4
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(total_payout)
+    .bind(count)
+    .bind(slot as i64)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Zero out a bounty's remaining escrow, for the terminal
+/// `BountyExpired` / `BountyFinalised` transitions (the residual
+/// escrow has been refunded / swept back to the poster on-chain).
+///
+/// The `status` itself comes from the hydrate in [`upsert_bounty`];
+/// this only settles the escrow column. No-op if the row is missing.
+pub async fn set_bounty_escrow_zero(pool: &PgPool, id: &str) -> Result<()> {
+    sqlx::query("UPDATE bounties SET escrow_remaining_nano = '0' WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
