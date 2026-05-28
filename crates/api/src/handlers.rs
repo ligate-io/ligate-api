@@ -60,6 +60,7 @@ fn cached<R: IntoResponse>(resp: R, max_age_secs: u32) -> Response {
 
 use crate::cursor;
 use crate::queries;
+use crate::responses;
 use crate::responses::{
     AddressSummaryResponse, AttestationResponse, AttestorSetResponse, BlockResponse, InfoResponse,
     Page, Pagination, RegisteredAtResponse, SchemaResponse, SearchResponse, SeenAtResponse,
@@ -1517,4 +1518,54 @@ pub async fn search(
         }
     }
     Json(SearchResponse::NotFound { query: q }).into_response()
+}
+
+/// `GET /v1/bounties/matching/{address}`, open bounties this address
+/// is potentially eligible for (`status='open'` AND the address has
+/// at least one attestation against the bounty's board schema).
+///
+/// The acceptance predicate is NOT enforced indexer-side; the chain
+/// re-checks at `ClaimBounty` time. This endpoint is the matching
+/// hint surface for the Mneme post-attest panel; it returns
+/// `{address, matches: []}` when the address has no eligible bounties.
+///
+/// Cached at `TTL_MODEST_SECS` because bounty status flips on the
+/// next claim event (multi-second cadence on devnet); shorter than
+/// the schemas TTL because bounty lifecycle is much more dynamic.
+pub async fn bounties_matching(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> impl IntoResponse {
+    // Modest upper bound on a single response. Real wallets shouldn't
+    // need more than a few matches at once; if they do, paginate.
+    const MATCH_LIMIT: i64 = 100;
+
+    let rows = match queries::bounties_matching_address(&state.pg, &address, MATCH_LIMIT).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, %address, "bounties_matching");
+            return internal_error();
+        }
+    };
+
+    let matches: Vec<responses::BountyMatchEntry> = rows
+        .into_iter()
+        .map(|r| responses::BountyMatchEntry {
+            id: r.id,
+            poster: r.poster,
+            board_schema_id: r.board_schema_id,
+            per_attestation_nano: r.per_attestation_nano,
+            escrow_remaining_nano: r.escrow_remaining_nano,
+            pool_nano: r.pool_nano,
+            acceptance: r.acceptance,
+            expiry_da_height: r.expiry_da_height,
+            posted_at_slot: r.posted_at_slot,
+            my_attestation_count: r.my_attestation_count,
+        })
+        .collect();
+
+    cached(
+        Json(responses::BountyMatchingResponse { address, matches }),
+        TTL_MODEST_SECS,
+    )
 }

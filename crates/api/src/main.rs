@@ -267,6 +267,14 @@ async fn main() -> Result<()> {
         )
         .route("/v1/attestations", get(handlers::attestations_list))
         .route("/v1/attestations/{id}", get(handlers::attestation_by_id))
+        // Bounty matching surface. Reads from the `bounties` table
+        // populated by the indexer on `Bounty/*` chain events; the
+        // chain side ships in ligate-chain v0.4.0+. Powers the Mneme
+        // post-attest panel + the bounty board operator dashboard.
+        .route(
+            "/v1/bounties/matching/{address}",
+            get(handlers::bounties_matching),
+        )
         .route("/v1/search", get(handlers::search))
         // Aggregate analytics for the explorer + investor dashboard.
         // All cached 30s in-process; see `stats::StatsCache`.
