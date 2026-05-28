@@ -394,9 +394,15 @@ async fn insert_resource_rows(
                 );
             }
         }
-        IndexerTx::Transfer(_) | IndexerTx::Unknown { .. } => {
-            // No resource rows to insert for transfers or unknown
-            // kinds. Address-summary counters are maintained by
+        IndexerTx::Transfer(_)
+        | IndexerTx::PostBounty(_)
+        | IndexerTx::ClaimBounty(_)
+        | IndexerTx::DisputeAttestation(_)
+        | IndexerTx::ResolveDispute(_)
+        | IndexerTx::CancelBounty(_)
+        | IndexerTx::Unknown { .. } => {
+            // No resource rows to insert for transfers, bounty events, or
+            // unknown kinds. Address-summary counters are maintained by
             // `update_address_summaries`.
         }
     }
@@ -423,7 +429,10 @@ async fn update_address_summaries(
         IndexerTx::RegisterAttestorSet(d) => Some(d.registered_by.as_str()),
         IndexerTx::RegisterSchema(d) => Some(d.owner.as_str()),
         IndexerTx::SubmitAttestation(d) => Some(d.submitter.as_str()),
-        IndexerTx::Unknown { .. } => None,
+        IndexerTx::PostBounty(d) => Some(d.poster.as_str()),
+        IndexerTx::ClaimBounty(d) => Some(d.attester.as_str()),
+        IndexerTx::DisputeAttestation(d) => Some(d.disputer.as_str()),
+        IndexerTx::ResolveDispute(_) | IndexerTx::CancelBounty(_) | IndexerTx::Unknown { .. } => None,
     };
 
     if let Some(addr) = sender {
