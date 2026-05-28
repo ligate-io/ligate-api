@@ -493,8 +493,9 @@ pub struct BountyMatchEntry {
     /// - `{"AttestorSet": "las1..."}`
     /// - `{"PayloadHashes": ["lph1...", ...]}`
     /// - `{"PeerCount": {"min_attestors": N}}`
-    /// The wallet uses this to render predicate-specific UI ("must be
-    /// signed by attestor set X", "must be one of these payload
+    ///
+    /// The wallet uses this to render predicate-specific UI ("must
+    /// be signed by attestor set X", "must be one of these payload
     /// hashes", etc.).
     pub acceptance: serde_json::Value,
     /// DA-layer block height the bounty expires at.
