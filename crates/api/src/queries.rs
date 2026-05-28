@@ -1203,3 +1203,114 @@ pub async fn attestation_id_by_payload_hash(
     .fetch_optional(pool)
     .await
 }
+
+// ---- bounties --------------------------------------------------------------
+//
+// `/v1/bounties/matching/{address}` reads from the `bounties` table
+// (populated by the indexer on `Bounty/*` chain events; see the
+// `20260528000001_bounties.sql` migration). The match logic:
+//
+// - Filter open bounties (`status='open'`) whose `board_schema_id`
+//   appears in the attestations the address has already submitted.
+// - For v0, the chain-side acceptance predicate (`Any` /
+//   `AttestorSet` / `PayloadHashes` / `PeerCount`) is NOT enforced
+//   indexer-side. The matching service surfaces "you have attested
+//   against this schema and there's an open bounty for it", letting
+//   the wallet decide whether to attempt a `ClaimBounty`. The chain
+//   enforces the predicate at ClaimBounty time.
+// - Returned tuples carry enough fields to render the Mneme post-
+//   attest panel without an N+1 fetch per match: bounty id, board
+//   schema id, per_attestation payout, expiry, status, the address's
+//   attestation count against the schema.
+
+/// One match row for `/v1/bounties/matching/{address}`.
+#[derive(Debug)]
+pub struct BountyMatchRow {
+    /// Bech32m `lbt1...` bounty id.
+    pub id: String,
+    /// `lid1...` of the bounty poster.
+    pub poster: String,
+    /// `lsc1...` of the bounty board's schema.
+    pub board_schema_id: String,
+    /// Per-attestation payout in AVOW nanos as a decimal string
+    /// (preserves u128 precision).
+    pub per_attestation_nano: String,
+    /// Remaining escrow at the indexer's last seen event.
+    pub escrow_remaining_nano: String,
+    /// Original pool size at PostBounty time.
+    pub pool_nano: String,
+    /// Acceptance predicate as compact JSONB; mirrors the chain's
+    /// `AcceptancePredicate` enum.
+    pub acceptance: Value,
+    /// DA-layer block height the bounty expires at.
+    pub expiry_da_height: i64,
+    /// Slot the bounty was posted at; drives the default ordering.
+    pub posted_at_slot: i64,
+    /// Count of the candidate address's attestations against the
+    /// bounty's board schema. Lets the Mneme UI show "you've already
+    /// attested N times against this board" inline.
+    pub my_attestation_count: i64,
+}
+
+#[allow(clippy::type_complexity)]
+type BountyMatchTuple = (
+    String, // b.id
+    String, // b.poster
+    String, // b.board_schema_id
+    String, // b.per_attestation_nano
+    String, // b.escrow_remaining_nano
+    String, // b.pool_nano
+    Value,  // b.acceptance
+    i64,    // b.expiry_da_height
+    i64,    // b.posted_at_slot
+    i64,    // count(a.id)
+);
+
+/// Read up to `limit` open bounties the address is potentially
+/// eligible for: those whose board schema appears in the address's
+/// attestations. Ordered by `(posted_at_slot DESC, id ASC)`.
+///
+/// `address` is the candidate's `lid1...` address.
+/// `limit` is clamped 1..=100 by the handler.
+pub async fn bounties_matching_address(
+    pool: &PgPool,
+    address: &str,
+    limit: i64,
+) -> sqlx::Result<Vec<BountyMatchRow>> {
+    let rows = sqlx::query_as::<_, BountyMatchTuple>(
+        "SELECT b.id, b.poster, b.board_schema_id,
+                b.per_attestation_nano, b.escrow_remaining_nano, b.pool_nano,
+                b.acceptance, b.expiry_da_height, b.posted_at_slot,
+                COUNT(a.id) AS my_attestation_count
+         FROM bounties b
+         JOIN attestations a ON a.schema_id = b.board_schema_id
+         WHERE b.status = 'open'
+           AND a.submitter = $1
+         GROUP BY b.id
+         ORDER BY b.posted_at_slot DESC, b.id ASC
+         LIMIT $2",
+    )
+    .bind(address)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|t| BountyMatchRow {
+            id: t.0,
+            poster: t.1,
+            board_schema_id: t.2,
+            per_attestation_nano: t.3,
+            escrow_remaining_nano: t.4,
+            pool_nano: t.5,
+            acceptance: t.6,
+            expiry_da_height: t.7,
+            posted_at_slot: t.8,
+            my_attestation_count: t.9,
+            // `pool_nano` is the column above; surfaced too so the
+            // wallet can render "X of Y AVOW remaining" without a
+            // second fetch.
+        })
+        .collect())
+}

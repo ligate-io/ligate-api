@@ -450,3 +450,58 @@ pub enum SearchResponse {
         query: String,
     },
 }
+
+// ---- bounty matching --------------------------------------------------------
+
+/// Body of `GET /v1/bounties/matching/{address}`.
+///
+/// Returns the open bounties whose board schema the address has at
+/// least one attestation against. The chain enforces the actual
+/// acceptance predicate at `ClaimBounty` time; this surface
+/// optimistically surfaces "you might be eligible" entries for the
+/// Mneme wallet's post-attest panel.
+#[derive(Debug, serde::Serialize)]
+pub struct BountyMatchingResponse {
+    /// Address the matches were computed for; echoed back for client
+    /// confirmation against the URL path.
+    pub address: String,
+    /// The matched bounties, newest-first.
+    pub matches: Vec<BountyMatchEntry>,
+}
+
+/// One entry in the matching response. Carries the bounty's
+/// settle-time parameters (`per_attestation`, `expiry`, etc.) plus the
+/// address's own attestation count against the schema, so the wallet
+/// can render the panel without a second fetch.
+#[derive(Debug, serde::Serialize)]
+pub struct BountyMatchEntry {
+    /// Bech32m `lbt1...` bounty id.
+    pub id: String,
+    /// `lid1...` of the bounty poster.
+    pub poster: String,
+    /// `lsc1...` of the bounty board's schema.
+    pub board_schema_id: String,
+    /// Payout per accepted claim, in AVOW nanos (decimal string for u128).
+    pub per_attestation_nano: String,
+    /// Remaining escrow at the indexer's last seen event.
+    pub escrow_remaining_nano: String,
+    /// Original pool size at PostBounty time.
+    pub pool_nano: String,
+    /// Acceptance predicate. Compact JSONB mirroring the chain's
+    /// `AcceptancePredicate` enum:
+    /// - `{"Any": {}}`
+    /// - `{"AttestorSet": "las1..."}`
+    /// - `{"PayloadHashes": ["lph1...", ...]}`
+    /// - `{"PeerCount": {"min_attestors": N}}`
+    /// The wallet uses this to render predicate-specific UI ("must be
+    /// signed by attestor set X", "must be one of these payload
+    /// hashes", etc.).
+    pub acceptance: serde_json::Value,
+    /// DA-layer block height the bounty expires at.
+    pub expiry_da_height: i64,
+    /// Slot the bounty was posted at.
+    pub posted_at_slot: i64,
+    /// Address's existing attestation count against the bounty's
+    /// board schema.
+    pub my_attestation_count: i64,
+}
