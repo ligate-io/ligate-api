@@ -256,13 +256,13 @@ impl NodeClient {
         Ok(Some(parsed.bounty))
     }
 
-    /// `GET /v1/modules/contract/contracts/{id}`. Returns the full
+    /// `GET /v1/modules/contracts/contracts/{id}`. Returns the full
     /// contract record by its bech32m `lct1...` id. `None` on 404 (the
     /// chain doesn't know that contract — e.g. the indexer raced ahead
     /// of state availability, or the id is bad).
     ///
     /// **Route note.** The custom REST route lives under
-    /// `/modules/contract/...` (singular — the chain mounts the module's
+    /// `/modules/contracts/...` (plural — the chain mounts the module's
     /// custom routes by hyphenated module *path*, not the struct name),
     /// even though the *event-key prefix* is `Contracts/` (plural — the
     /// SDK derives that from the struct identifier). The chain wraps the
@@ -272,7 +272,7 @@ impl NodeClient {
     /// the authoritative status + static fields, since the events
     /// themselves are thin.
     pub async fn contract_at(&self, id: &str) -> Result<Option<ContractRecord>> {
-        let url = self.url(&format!("v1/modules/contract/contracts/{id}"));
+        let url = self.url(&format!("v1/modules/contracts/contracts/{id}"));
         let resp = self
             .http
             .get(url.clone())
@@ -500,10 +500,10 @@ mod tests {
         let mut srv = Server::new_async().await;
         // `{"contract": {...}}` envelope; PascalCase status + u128
         // string amounts, raw bech32m addresses, hex criteria_doc_hash.
-        // Route is `/modules/contract/...` (singular path) per the
+        // Route is `/modules/contracts/...` (plural path) per the
         // chain's custom REST mount.
         let _m = srv
-            .mock("GET", "/v1/modules/contract/contracts/lct1abc")
+            .mock("GET", "/v1/modules/contracts/contracts/lct1abc")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -532,7 +532,7 @@ mod tests {
     async fn contract_at_returns_none_on_404() {
         let mut srv = Server::new_async().await;
         let _m = srv
-            .mock("GET", "/v1/modules/contract/contracts/lct1missing")
+            .mock("GET", "/v1/modules/contracts/contracts/lct1missing")
             .with_status(404)
             .create_async()
             .await;

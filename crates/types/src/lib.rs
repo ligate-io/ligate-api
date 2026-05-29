@@ -868,10 +868,10 @@ pub struct BountyFinalisedDetails {
 }
 
 // ============================================================================
-// Contract module (`/v1/modules/contract/...`)
+// Contract module (`/v1/modules/contracts/...`)
 // ============================================================================
 
-/// `GET /v1/modules/contract/contracts/{id}` body.
+/// `GET /v1/modules/contracts/contracts/{id}` body.
 ///
 /// The indexer hydrates this after seeing any `Contracts/*` event,
 /// since those events are thin (id + addresses/amounts only) and don't
@@ -883,7 +883,7 @@ pub struct BountyFinalisedDetails {
 /// **Module struct name.** The contract module's struct is `Contracts`
 /// (plural — see ligate-chain `crates/modules/contract/src/lib.rs`), so
 /// the SDK-derived event-key prefix is `Contracts/` (NOT `Contract/`)
-/// and the REST custom route lives under `/modules/contract/...`. This
+/// and the REST custom route lives under `/modules/contracts/...`. This
 /// envelope mirrors the chain's `ContractResponse { contract }` shape.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ContractResponse {
