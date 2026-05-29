@@ -254,10 +254,17 @@ pub async fn pending_slot_heights(pool: &PgPool) -> Result<Vec<u64>> {
 ///
 /// Idempotent on the `hash` primary key — re-running backfill against
 /// the same slots doesn't create duplicates. The `details` JSONB shape
-/// is per-`kind` per RFC 0002. Sender / nonce / fee fields are nullable
-/// because the chain elides the borsh-encoded body from REST (see
-/// migration 0003); the indexer records what it can derive from
-/// emitted events and leaves the rest `NULL`.
+/// is per-`kind` per RFC 0002.
+///
+/// `decoded` carries the signer pubkey + nonce recovered from the
+/// persisted signed-tx body (ligate-chain#551 / #550), when present.
+/// For txs ingested before `save_tx_bodies` was enabled the body is
+/// elided, `decoded` is `None`, and `sender_pubkey` / `nonce` stay
+/// `NULL` while `sender` falls back to the event-derived value — the
+/// pre-#550 behaviour. When `decoded` IS present, its `sender` (the
+/// actual tx signer = fee payer) is authoritative and preferred over
+/// the event-derived sender; for bounty/contract kinds (whose thin
+/// events carry no clean sender) this is the only source.
 ///
 /// `raw` captures the full event payloads + tx number / batch number,
 /// so deep-dive views can extract fields the typed columns don't yet
@@ -268,6 +275,7 @@ pub async fn insert_transaction(
     slot_height: u64,
     position_in_block: i32,
     raw_event_keys: &[String],
+    decoded: Option<&crate::decode::DecodedTxBody>,
 ) -> Result<()> {
     // Map the parser's IndexerTx variant to (kind_string, details_json).
     let (kind, details) = match &classified.kind {
@@ -377,25 +385,33 @@ pub async fn insert_transaction(
         "event_keys": raw_event_keys,
     });
 
-    // Per RFC 0002 / migration 0003, sender / sender_pubkey / nonce /
-    // fee_paid_nano are nullable. For Transfer txs we can fill `sender`
-    // from the event payload's `from.user`; for Attestation-module
-    // events we get sender from the typed payload (registered_by /
-    // owner / submitter); pubkey / nonce / fee remain null until the
-    // chain exposes them on the REST surface.
-    let sender: Option<&str> = match &classified.kind {
+    // sender / sender_pubkey / nonce / fee_paid_nano are all nullable
+    // (migrations 20260509000002 + 20260529000002).
+    //
+    // `sender` resolution order:
+    //   1. The decoded tx-body signer (authoritative — it's the actual
+    //      signer / fee payer / nonce owner; verified to equal the
+    //      `Bank/TokenTransferred` `from` on transfers, and the only
+    //      sender source for bounty/contract kinds whose thin events
+    //      carry none).
+    //   2. Fallback for body-less (pre-#550) txs: the event-derived
+    //      address (Transfer.from / RegisterSchema.owner / etc.).
+    let event_sender: Option<&str> = match &classified.kind {
         IndexerTx::Transfer(t) => Some(t.from.as_str()),
         IndexerTx::RegisterAttestorSet(d) => Some(d.registered_by.as_str()),
         IndexerTx::RegisterSchema(d) => Some(d.owner.as_str()),
         IndexerTx::SubmitAttestation(d) => Some(d.submitter.as_str()),
-        // Bounty + contract events don't carry a clean tx sender in the
-        // decoded shape (the poster/claimant/worker lives in the
-        // hydrated record, not the parser variant); left NULL for Phase
-        // 1/2, same rationale as `update_address_summaries`.
         IndexerTx::BountyEvent { .. }
         | IndexerTx::ContractEvent { .. }
         | IndexerTx::Unknown { .. } => None,
     };
+    let sender: Option<&str> = decoded.map(|d| d.sender.as_str()).or(event_sender);
+
+    // Signer pubkey (`lpk1…`) + nonce come only from the decoded body.
+    let sender_pubkey: Option<&str> = decoded.map(|d| d.sender_pubkey.as_str());
+    let nonce: Option<i64> = decoded
+        .and_then(|d| d.nonce)
+        .map(|n| i64::try_from(n).unwrap_or(i64::MAX));
 
     // Protocol fee: flat per-kind constant from devnet-1's
     // `chain/devnet-1/genesis/attestation.json`. For testnet/mainnet
@@ -444,14 +460,19 @@ pub async fn insert_transaction(
             fee_paid_nano, protocol_fee_nano,
             kind, details, raw, outcome, revert_reason
          ) VALUES (
-            $1, $2, $3, $4, NULL, NULL,
-            $5, $6,
-            $7, $8, $9, $10, NULL
+            $1, $2, $3, $4, $5, $6,
+            $7, $8,
+            $9, $10, $11, $12, NULL
          )
          ON CONFLICT (hash) DO UPDATE SET
             slot              = EXCLUDED.slot,
             position          = EXCLUDED.position,
-            sender            = EXCLUDED.sender,
+            -- COALESCE-preserve the body-derived columns: a re-ingest
+            -- that can't see the body (transient empty body) must not
+            -- blank a value an earlier decode already recovered.
+            sender            = COALESCE(EXCLUDED.sender, transactions.sender),
+            sender_pubkey     = COALESCE(EXCLUDED.sender_pubkey, transactions.sender_pubkey),
+            nonce             = COALESCE(EXCLUDED.nonce, transactions.nonce),
             fee_paid_nano     = EXCLUDED.fee_paid_nano,
             protocol_fee_nano = EXCLUDED.protocol_fee_nano,
             kind              = EXCLUDED.kind,
@@ -464,6 +485,8 @@ pub async fn insert_transaction(
     .bind(slot_height as i64)
     .bind(position_in_block)
     .bind(sender)
+    .bind(sender_pubkey)
+    .bind(nonce)
     .bind(fee_paid_nano)
     .bind(protocol_fee_nano)
     .bind(kind)

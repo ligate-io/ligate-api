@@ -100,6 +100,7 @@ async fn ingest_loop_writes_chain_identity_and_first_slot() {
         rpc_url: srv.url(),
         database_url: database_url.clone(),
         start_height: Some(1),
+        numeric_chain_id: 4242,
     };
     let handle = tokio::spawn(async move { run(cfg).await });
 
