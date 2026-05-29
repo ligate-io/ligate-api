@@ -281,6 +281,14 @@ async fn main() -> Result<()> {
             get(handlers::bounties_matching),
         )
         .route("/v1/bounties/{bountyId}", get(handlers::bounty_detail))
+        // Contract surface (phase 2). Reads from the `contracts` table
+        // populated by the indexer on `Contracts/*` chain events (NOTE
+        // the plural `Contracts/` event-key prefix — the module struct
+        // is `Contracts`). The chain side ships in ligate-chain v0.4.0+.
+        // `/{contractId}` (3 segments) and the list route (`/v1/contracts`)
+        // are distinct paths; axum disambiguates cleanly.
+        .route("/v1/contracts", get(handlers::contracts_list))
+        .route("/v1/contracts/{contractId}", get(handlers::contract_detail))
         .route("/v1/search", get(handlers::search))
         // Aggregate analytics for the explorer + investor dashboard.
         // All cached 30s in-process; see `stats::StatsCache`.

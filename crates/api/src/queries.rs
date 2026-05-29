@@ -1461,3 +1461,154 @@ pub async fn bounties_page(
         .await?;
     Ok(rows.into_iter().map(bounty_row_from_tuple).collect())
 }
+
+// ---- contracts -------------------------------------------------------------
+//
+// `/v1/contracts` (list) and `/v1/contracts/{id}` (detail) read from the
+// `contracts` table, populated by the indexer on `Contracts/*` chain
+// events (see the `20260529000001_contracts.sql` migration). Mirrors the
+// bounties read path; the differences are: no board-schema field
+// (contracts aren't schema-anchored), an `arbiter` column + `?arbiter=`
+// filter, and the 8-state status enum.
+
+/// One row of the `contracts` table, mapped to a Rust shape. Mirrors
+/// the table definition in `migrations/20260529000001_contracts.sql`.
+/// The handler converts this to
+/// [`crate::responses::ContractDetailResponse`].
+#[derive(Debug)]
+pub struct ContractRow {
+    /// Bech32m `lct1...` contract id.
+    pub id: String,
+    /// Poster address (raw bech32m `lig1...`, stored verbatim).
+    pub poster: String,
+    /// Arbiter address named at post time (raw bech32m `lig1...`).
+    pub arbiter: String,
+    /// 32-byte criteria-doc content hash (TEXT, hex pass-through).
+    pub criteria_doc_hash: String,
+    /// Original pool size in AVOW nanos (u128 decimal string).
+    pub pool_nano: String,
+    /// Remaining escrow at the indexer's last seen event (u128 string).
+    pub escrow_remaining_nano: String,
+    /// Arbiter fee in basis points.
+    pub arbiter_fee_bps: i32,
+    /// One of `open`/`committed`/`delivered`/`accepted`/`rejected`/
+    /// `disputed`/`cancelled`/`expired`.
+    pub status: String,
+    /// DA-layer block height the contract expires at.
+    pub expiry_da_height: i64,
+    /// Acceptance window in chain blocks before auto-accept.
+    pub dispute_window_blocks: i32,
+    /// Slot the PostContract tx landed in.
+    pub posted_at_slot: i64,
+    /// Tx hash of the PostContract tx.
+    pub posted_at_tx: String,
+    /// Timestamp of the PostContract tx.
+    pub posted_at_timestamp: DateTime<Utc>,
+}
+
+#[allow(clippy::type_complexity)]
+type ContractTuple = (
+    String,        // id
+    String,        // poster
+    String,        // arbiter
+    String,        // criteria_doc_hash
+    String,        // pool_nano
+    String,        // escrow_remaining_nano
+    i32,           // arbiter_fee_bps
+    String,        // status
+    i64,           // expiry_da_height
+    i32,           // dispute_window_blocks
+    i64,           // posted_at_slot
+    String,        // posted_at_tx
+    DateTime<Utc>, // posted_at_timestamp
+);
+
+fn contract_row_from_tuple(t: ContractTuple) -> ContractRow {
+    ContractRow {
+        id: t.0,
+        poster: t.1,
+        arbiter: t.2,
+        criteria_doc_hash: t.3,
+        pool_nano: t.4,
+        escrow_remaining_nano: t.5,
+        arbiter_fee_bps: t.6,
+        status: t.7,
+        expiry_da_height: t.8,
+        dispute_window_blocks: t.9,
+        posted_at_slot: t.10,
+        posted_at_tx: t.11,
+        posted_at_timestamp: t.12,
+    }
+}
+
+/// The `SELECT` column list shared by [`contract_by_id`] and
+/// [`contracts_page`]. Order MUST match [`ContractTuple`].
+const CONTRACT_COLUMNS: &str = "id, poster, arbiter, criteria_doc_hash, pool_nano,
+            escrow_remaining_nano, arbiter_fee_bps, status, expiry_da_height,
+            dispute_window_blocks, posted_at_slot, posted_at_tx, posted_at_timestamp";
+
+/// Read one contract by its bech32m `lct1...` id. `None` if not yet
+/// indexed (the indexer hasn't seen a `Contracts/*` event for it, or it
+/// doesn't exist).
+pub async fn contract_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<ContractRow>> {
+    let sql = format!("SELECT {CONTRACT_COLUMNS} FROM contracts WHERE id = $1");
+    let row = sqlx::query_as::<_, ContractTuple>(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(contract_row_from_tuple))
+}
+
+/// Cursor shape for `/v1/contracts` (compound: `(posted_at_slot, id)`
+/// DESC). The id tiebreaker handles contracts posted in the same slot.
+pub struct ContractsCursor {
+    pub posted_at_slot: i64,
+    pub id: String,
+}
+
+/// Read a page of contracts, descending by `(posted_at_slot, id)`.
+///
+/// Optional filters compose multiplicatively (same
+/// `($N::TYPE IS NULL OR ...)` collapse pattern as [`bounties_page`], so
+/// an inert filter costs nothing at plan time):
+/// - `status` narrows to a single lifecycle state (`open`/`committed`/
+///   `delivered`/`accepted`/`rejected`/`disputed`/`cancelled`/`expired`)
+/// - `poster` narrows to a single poster address (`lig1...`)
+/// - `arbiter` narrows to a single named arbiter address (`lig1...`)
+/// - `before` is the pagination cursor; `None` starts at the head
+///
+/// Fetches `limit + 1` rows for has-more detection (same trick as the
+/// other list queries).
+pub async fn contracts_page(
+    pool: &PgPool,
+    status: Option<&str>,
+    poster: Option<&str>,
+    arbiter: Option<&str>,
+    before: Option<ContractsCursor>,
+    limit_plus_one: i64,
+) -> sqlx::Result<Vec<ContractRow>> {
+    let (cursor_slot, cursor_id): (Option<i64>, Option<String>) = match before {
+        Some(c) => (Some(c.posted_at_slot), Some(c.id)),
+        None => (None, None),
+    };
+    let sql = format!(
+        "SELECT {CONTRACT_COLUMNS}
+         FROM contracts
+         WHERE ($1::TEXT   IS NULL OR status = $1)
+           AND ($2::TEXT   IS NULL OR poster = $2)
+           AND ($3::TEXT   IS NULL OR arbiter = $3)
+           AND ($4::BIGINT IS NULL OR (posted_at_slot, id) < ($4, $5))
+         ORDER BY posted_at_slot DESC, id DESC
+         LIMIT $6"
+    );
+    let rows: Vec<ContractTuple> = sqlx::query_as(&sql)
+        .bind(status)
+        .bind(poster)
+        .bind(arbiter)
+        .bind(cursor_slot)
+        .bind(cursor_id)
+        .bind(limit_plus_one)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(contract_row_from_tuple).collect())
+}

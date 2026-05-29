@@ -868,6 +868,263 @@ pub struct BountyFinalisedDetails {
 }
 
 // ============================================================================
+// Contract module (`/v1/modules/contracts/...`)
+// ============================================================================
+
+/// `GET /v1/modules/contracts/contracts/{id}` body.
+///
+/// The indexer hydrates this after seeing any `Contracts/*` event,
+/// since those events are thin (id + addresses/amounts only) and don't
+/// carry the full contract record. The inner [`ContractRecord`] is the
+/// authoritative source for the static fields (arbiter, criteria doc
+/// hash, pool, expiry, dispute window, arbiter fee) AND the live
+/// `status`.
+///
+/// **Module struct name.** The contract module's struct is `Contracts`
+/// (plural — see ligate-chain `crates/modules/contract/src/lib.rs`), so
+/// the SDK-derived event-key prefix is `Contracts/` (NOT `Contract/`)
+/// and the REST custom route lives under `/modules/contracts/...`. This
+/// envelope mirrors the chain's `ContractResponse { contract }` shape.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractResponse {
+    /// The contract record.
+    pub contract: ContractRecord,
+}
+
+/// One contract record from chain state. Mirrors the contract module's
+/// on-chain `ContractState` struct (chain contract primitive,
+/// ligate-chain v0.4.0+) closely enough for the indexer to populate
+/// the `contracts` table.
+///
+/// Amounts are u128 decimal strings (JS-compat, same convention as the
+/// bank module's [`Coins::amount`] and the bounty module's
+/// [`BountyRecord`]). Addresses are raw bech32m `lig1...` strings (NOT
+/// the bank module's `{"user": "..."}` wrapper), matching the contract
+/// module's event serialisation. `criteria_doc_hash` is hedged as a
+/// `serde_json::Value` (same rationale as `payload_shape_hash`): the
+/// chain serialises the `[u8; 32]` as a hex string today, but the
+/// indexer stringifies and stores verbatim so a future encoding switch
+/// (e.g. bech32m wrap) doesn't break ingest.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractRecord {
+    /// Poster address (buyer), bech32m `lig1...`. Receives refunds on
+    /// cancel and bond payouts on rejected dispute resolutions.
+    pub poster: String,
+    /// Arbiter address named at post time, bech32m `lig1...`.
+    /// Authorised to resolve disputes on this contract.
+    pub arbiter: String,
+    /// 32-byte content hash of the off-chain criteria document. Chain
+    /// serialises the `[u8; 32]` as a hex string (with or without `0x`
+    /// prefix depending on the chain rev). Kept as `serde_json::Value`
+    /// so future chain encodings don't break ingest; the indexer
+    /// stringifies and stores verbatim. Same hedge as
+    /// [`SchemaRegisteredDetails::payload_shape_hash`].
+    pub criteria_doc_hash: Value,
+    /// Total `AVOW` originally escrowed, in nanos. u128 decimal string.
+    pub pool: String,
+    /// DA-layer block height the contract expires at.
+    pub expiry_da_height: u64,
+    /// Window in chain blocks the poster has to accept-or-reject a
+    /// delivery before it auto-accepts.
+    pub dispute_window_blocks: u32,
+    /// Arbiter fee in basis points (paid only if the arbiter resolves a
+    /// dispute). Default 500 bps (5%) on chain.
+    pub arbiter_fee_bps: u16,
+    /// Lifecycle state. Chain emits PascalCase (`"Open"`/`"Committed"`/
+    /// `"Delivered"`/`"Accepted"`/`"Rejected"`/`"Disputed"`/
+    /// `"Cancelled"`/`"Expired"`); the indexer maps to the lowercase
+    /// `contracts.status` CHECK enum.
+    pub status: String,
+}
+
+// ---- Contract module event payloads ----------------------------------------
+//
+// Each variant of the chain's contract-module `Event` serialises via
+// serde's default externally-tagged enum encoding: `{<PascalCaseVariant>:
+// {<fields>}}`. The structs below mirror the chain's contract-module
+// event shapes for indexing, using the same `#[serde(rename)]` +
+// descriptive-snake_case-field convention as the bounty/attestation
+// events above. Addresses + ids are raw bech32m strings; amounts are
+// u128 decimal strings.
+//
+// **Event-key prefix.** The contract module's struct is `Contracts`
+// (plural), so the SDK-derived event keys are `Contracts/ContractPosted`,
+// `Contracts/WorkerCommitted`, etc. (the SDK builds the key as
+// `format!("{module_struct_ident}/{variant}")`). This is the single
+// most error-prone spot in mirroring the bounty work — bounty's struct
+// is `Bounty`, hence `Bounty/...`, but contract's is `Contracts`.
+//
+// The events are intentionally THIN: they carry only the contract id
+// (plus per-event extras like worker / payout / refund amount). The
+// indexer re-hydrates the full record via [`ContractResponse`] on every
+// event, so these payloads only need the fields that drive per-event
+// deltas (escrow-zeroing on terminal states).
+
+/// Payload of `Contracts/ContractPosted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractPostedEvent {
+    /// Inner externally-tagged variant. Wire name is the PascalCase
+    /// variant identifier; Rust field name is the descriptive
+    /// snake_case form (see bounty events for the convention).
+    #[serde(rename = "ContractPosted")]
+    pub contract_posted: ContractPostedDetails,
+}
+
+/// Inner fields of `Contracts/ContractPosted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractPostedDetails {
+    /// Bech32m `lct1...` deterministic contract id.
+    pub contract_id: String,
+    /// Poster address (raw bech32m `lig1...`).
+    pub poster: String,
+    /// Arbiter named at post time (raw bech32m `lig1...`).
+    pub arbiter: String,
+    /// Initial escrow pool, u128 decimal string.
+    pub pool: String,
+}
+
+/// Payload of `Contracts/WorkerCommitted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WorkerCommittedEvent {
+    /// Inner externally-tagged variant. See [`ContractPostedEvent`].
+    #[serde(rename = "WorkerCommitted")]
+    pub worker_committed: WorkerCommittedDetails,
+}
+
+/// Inner fields of `Contracts/WorkerCommitted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WorkerCommittedDetails {
+    /// Bech32m `lct1...` contract id.
+    pub contract_id: String,
+    /// Worker address (raw bech32m `lig1...`).
+    pub worker: String,
+    /// SHA-256 commitment to the deliverable. Chain serialises the
+    /// `[u8; 32]` as a hex string; kept as `Value` for the same
+    /// forward-compat reason as [`ContractRecord::criteria_doc_hash`].
+    #[serde(default)]
+    pub commit_hash: Value,
+    /// Bond locked, u128 decimal string.
+    pub bond: String,
+}
+
+/// Payload of `Contracts/ContractDelivered`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractDeliveredEvent {
+    /// Inner externally-tagged variant. See [`ContractPostedEvent`].
+    #[serde(rename = "ContractDelivered")]
+    pub contract_delivered: ContractDeliveredDetails,
+}
+
+/// Inner fields of `Contracts/ContractDelivered`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractDeliveredDetails {
+    /// Bech32m `lct1...` contract id.
+    pub contract_id: String,
+    /// Worker who delivered (raw bech32m `lig1...`).
+    pub worker: String,
+    /// Bech32m `lat1...` attestation id pointing at the deliverable's
+    /// proof of work.
+    pub deliverable_attestation_id: String,
+}
+
+/// Payload of `Contracts/DeliveryAccepted`. Emitted both on the
+/// poster's explicit `AcceptDelivery` and on the permissionless
+/// `FinalizeDelivery` auto-accept sweep (the chain emits the same
+/// `DeliveryAccepted` event for both — the indexer treats them
+/// identically: payout settled, escrow drained).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeliveryAcceptedEvent {
+    /// Inner externally-tagged variant. See [`ContractPostedEvent`].
+    #[serde(rename = "DeliveryAccepted")]
+    pub delivery_accepted: DeliveryAcceptedDetails,
+}
+
+/// Inner fields of `Contracts/DeliveryAccepted`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeliveryAcceptedDetails {
+    /// Bech32m `lct1...` contract id.
+    pub contract_id: String,
+    /// Worker who got paid (raw bech32m `lig1...`).
+    pub worker: String,
+    /// Payout amount, u128 decimal string.
+    pub payout: String,
+}
+
+/// Payload of `Contracts/DeliveryRejected`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeliveryRejectedEvent {
+    /// Inner externally-tagged variant. See [`ContractPostedEvent`].
+    #[serde(rename = "DeliveryRejected")]
+    pub delivery_rejected: DeliveryRejectedDetails,
+}
+
+/// Inner fields of `Contracts/DeliveryRejected`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeliveryRejectedDetails {
+    /// Bech32m `lct1...` contract id.
+    pub contract_id: String,
+    /// Worker whose delivery was rejected (raw bech32m `lig1...`).
+    pub worker: String,
+    /// Dispute ground. Chain emits one of `"CriteriaMismatch"` /
+    /// `"MalformedDelivery"` / `"ExpiredAtDelivery"` / `"Other"`. Kept
+    /// as a string pass-through; the indexer doesn't branch on it.
+    pub reason: String,
+}
+
+/// Payload of `Contracts/ContractDisputeResolved`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractDisputeResolvedEvent {
+    /// Inner externally-tagged variant. See [`ContractPostedEvent`].
+    #[serde(rename = "ContractDisputeResolved")]
+    pub contract_dispute_resolved: ContractDisputeResolvedDetails,
+}
+
+/// Inner fields of `Contracts/ContractDisputeResolved`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractDisputeResolvedDetails {
+    /// Bech32m `lct1...` contract id.
+    pub contract_id: String,
+    /// Resolution decision: `"AcceptDelivery"` or `"RejectDelivery"`.
+    pub decision: String,
+    /// Address that received the pool (raw bech32m `lig1...`).
+    pub winner: String,
+}
+
+/// Payload of `Contracts/ContractCancelled`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractCancelledEvent {
+    /// Inner externally-tagged variant. See [`ContractPostedEvent`].
+    #[serde(rename = "ContractCancelled")]
+    pub contract_cancelled: ContractCancelledDetails,
+}
+
+/// Inner fields of `Contracts/ContractCancelled`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractCancelledDetails {
+    /// Bech32m `lct1...` contract id.
+    pub contract_id: String,
+    /// Amount refunded to the poster, u128 decimal string.
+    pub refunded_to_poster: String,
+}
+
+/// Payload of `Contracts/ContractExpired`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractExpiredEvent {
+    /// Inner externally-tagged variant. See [`ContractPostedEvent`].
+    #[serde(rename = "ContractExpired")]
+    pub contract_expired: ContractExpiredDetails,
+}
+
+/// Inner fields of `Contracts/ContractExpired`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractExpiredDetails {
+    /// Bech32m `lct1...` contract id.
+    pub contract_id: String,
+    /// Amount refunded to the poster, u128 decimal string.
+    pub refunded_to_poster: String,
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -983,6 +1240,126 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(finalised.bounty_finalised.swept_to_poster, "0");
+    }
+
+    #[test]
+    fn contract_response_round_trip() {
+        // Chain emits PascalCase `status`, u128 amounts as strings,
+        // raw bech32m addresses, and `criteria_doc_hash` as a hex
+        // string (hedged as a JSON Value on our side).
+        let body = r#"{
+            "contract": {
+                "poster": "lig1poster",
+                "arbiter": "lig1arbiter",
+                "criteria_doc_hash": "0xdeadbeef",
+                "pool": "5000000000",
+                "expiry_da_height": 123456,
+                "dispute_window_blocks": 100,
+                "arbiter_fee_bps": 500,
+                "status": "Open"
+            }
+        }"#;
+        let parsed: ContractResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.contract.poster, "lig1poster");
+        assert_eq!(parsed.contract.arbiter, "lig1arbiter");
+        assert_eq!(parsed.contract.criteria_doc_hash, "0xdeadbeef");
+        assert_eq!(parsed.contract.pool, "5000000000");
+        assert_eq!(parsed.contract.expiry_da_height, 123456);
+        assert_eq!(parsed.contract.dispute_window_blocks, 100);
+        assert_eq!(parsed.contract.arbiter_fee_bps, 500);
+        assert_eq!(parsed.contract.status, "Open");
+    }
+
+    #[test]
+    fn contract_event_payloads_round_trip() {
+        // Externally-tagged enum encoding: PascalCase variant key, raw
+        // bech32m addresses (no `{"user": ...}` wrapper), u128 strings.
+        let posted: ContractPostedEvent = serde_json::from_value(serde_json::json!({
+            "ContractPosted": {
+                "contract_id": "lct1abc",
+                "poster": "lig1poster",
+                "arbiter": "lig1arbiter",
+                "pool": "5000000000"
+            }
+        }))
+        .unwrap();
+        assert_eq!(posted.contract_posted.contract_id, "lct1abc");
+        assert_eq!(posted.contract_posted.arbiter, "lig1arbiter");
+        assert_eq!(posted.contract_posted.pool, "5000000000");
+
+        let committed: WorkerCommittedEvent = serde_json::from_value(serde_json::json!({
+            "WorkerCommitted": {
+                "contract_id": "lct1abc",
+                "worker": "lig1worker",
+                "commit_hash": "0xc0ffee",
+                "bond": "250000000"
+            }
+        }))
+        .unwrap();
+        assert_eq!(committed.worker_committed.worker, "lig1worker");
+        assert_eq!(committed.worker_committed.bond, "250000000");
+
+        let delivered: ContractDeliveredEvent = serde_json::from_value(serde_json::json!({
+            "ContractDelivered": {
+                "contract_id": "lct1abc",
+                "worker": "lig1worker",
+                "deliverable_attestation_id": "lat1xyz"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            delivered.contract_delivered.deliverable_attestation_id,
+            "lat1xyz"
+        );
+
+        let accepted: DeliveryAcceptedEvent = serde_json::from_value(serde_json::json!({
+            "DeliveryAccepted": {
+                "contract_id": "lct1abc",
+                "worker": "lig1worker",
+                "payout": "5000000000"
+            }
+        }))
+        .unwrap();
+        assert_eq!(accepted.delivery_accepted.payout, "5000000000");
+
+        let rejected: DeliveryRejectedEvent = serde_json::from_value(serde_json::json!({
+            "DeliveryRejected": {
+                "contract_id": "lct1abc",
+                "worker": "lig1worker",
+                "reason": "CriteriaMismatch"
+            }
+        }))
+        .unwrap();
+        assert_eq!(rejected.delivery_rejected.reason, "CriteriaMismatch");
+
+        let resolved: ContractDisputeResolvedEvent = serde_json::from_value(serde_json::json!({
+            "ContractDisputeResolved": {
+                "contract_id": "lct1abc",
+                "decision": "AcceptDelivery",
+                "winner": "lig1worker"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            resolved.contract_dispute_resolved.decision,
+            "AcceptDelivery"
+        );
+        assert_eq!(resolved.contract_dispute_resolved.winner, "lig1worker");
+
+        let cancelled: ContractCancelledEvent = serde_json::from_value(serde_json::json!({
+            "ContractCancelled": { "contract_id": "lct1abc", "refunded_to_poster": "5000000000" }
+        }))
+        .unwrap();
+        assert_eq!(
+            cancelled.contract_cancelled.refunded_to_poster,
+            "5000000000"
+        );
+
+        let expired: ContractExpiredEvent = serde_json::from_value(serde_json::json!({
+            "ContractExpired": { "contract_id": "lct1abc", "refunded_to_poster": "5000000000" }
+        }))
+        .unwrap();
+        assert_eq!(expired.contract_expired.refunded_to_poster, "5000000000");
     }
 
     #[test]

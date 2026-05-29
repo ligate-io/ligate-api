@@ -21,8 +21,8 @@
 //! - `GET /v1/ledger/slots/{height}` — driver of the backfill loop.
 
 use ligate_api_types::{
-    BountyRecord, BountyResponse, ChainClusterTopology, LedgerBatch, LedgerEvent, LedgerTx,
-    RollupInfo, SlotResponse,
+    BountyRecord, BountyResponse, ChainClusterTopology, ContractRecord, ContractResponse,
+    LedgerBatch, LedgerEvent, LedgerTx, RollupInfo, SlotResponse,
 };
 use reqwest::Client as Http;
 use url::Url;
@@ -256,6 +256,42 @@ impl NodeClient {
         Ok(Some(parsed.bounty))
     }
 
+    /// `GET /v1/modules/contracts/contracts/{id}`. Returns the full
+    /// contract record by its bech32m `lct1...` id. `None` on 404 (the
+    /// chain doesn't know that contract — e.g. the indexer raced ahead
+    /// of state availability, or the id is bad).
+    ///
+    /// **Route note.** The custom REST route lives under
+    /// `/modules/contracts/...` (plural — the chain mounts the module's
+    /// custom routes by hyphenated module *path*, not the struct name),
+    /// even though the *event-key prefix* is `Contracts/` (plural — the
+    /// SDK derives that from the struct identifier). The chain wraps the
+    /// record in a `{"contract": {...}}` envelope (same convention as
+    /// `BountyResponse`); this unwraps to the inner [`ContractRecord`].
+    /// The indexer calls this on every `Contracts/*` event to hydrate
+    /// the authoritative status + static fields, since the events
+    /// themselves are thin.
+    pub async fn contract_at(&self, id: &str) -> Result<Option<ContractRecord>> {
+        let url = self.url(&format!("v1/modules/contracts/contracts/{id}"));
+        let resp = self
+            .http
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(IndexerError::NodeUnreachable)?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        let bytes = resp.bytes().await.map_err(IndexerError::NodeUnreachable)?;
+        let parsed = serde_json::from_slice::<ContractResponse>(&bytes).map_err(|source| {
+            IndexerError::NodeBadShape {
+                url: url.to_string(),
+                source,
+            }
+        })?;
+        Ok(Some(parsed.contract))
+    }
+
     /// Build a fully-qualified URL by joining `path` onto `self.base`.
     fn url(&self, path: &str) -> Url {
         // `Url::join` drops the existing path segment unless we've
@@ -457,6 +493,51 @@ mod tests {
             .await;
         let client = NodeClient::new(&srv.url()).unwrap();
         assert!(client.bounty_at("lbt1missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn contract_at_parses_canonical_body() {
+        let mut srv = Server::new_async().await;
+        // `{"contract": {...}}` envelope; PascalCase status + u128
+        // string amounts, raw bech32m addresses, hex criteria_doc_hash.
+        // Route is `/modules/contracts/...` (plural path) per the
+        // chain's custom REST mount.
+        let _m = srv
+            .mock("GET", "/v1/modules/contracts/contracts/lct1abc")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"contract":{"poster":"lig1poster","arbiter":"lig1arbiter","criteria_doc_hash":"0xdeadbeef","pool":"5000000000","expiry_da_height":123456,"dispute_window_blocks":100,"arbiter_fee_bps":500,"status":"Open"}}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = NodeClient::new(&srv.url()).unwrap();
+        let rec = client
+            .contract_at("lct1abc")
+            .await
+            .unwrap()
+            .expect("contract present");
+        assert_eq!(rec.poster, "lig1poster");
+        assert_eq!(rec.arbiter, "lig1arbiter");
+        assert_eq!(rec.criteria_doc_hash, "0xdeadbeef");
+        assert_eq!(rec.pool, "5000000000");
+        assert_eq!(rec.expiry_da_height, 123456);
+        assert_eq!(rec.dispute_window_blocks, 100);
+        assert_eq!(rec.arbiter_fee_bps, 500);
+        assert_eq!(rec.status, "Open");
+    }
+
+    #[tokio::test]
+    async fn contract_at_returns_none_on_404() {
+        let mut srv = Server::new_async().await;
+        let _m = srv
+            .mock("GET", "/v1/modules/contracts/contracts/lct1missing")
+            .with_status(404)
+            .create_async()
+            .await;
+        let client = NodeClient::new(&srv.url()).unwrap();
+        assert!(client.contract_at("lct1missing").await.unwrap().is_none());
     }
 
     #[tokio::test]
