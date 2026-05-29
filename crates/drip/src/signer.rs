@@ -286,7 +286,8 @@ impl Signer {
 
     /// Sign and submit a `bank.transfer` of `amount_nano` from the
     /// signer's address to `recipient`. Returns the chain-issued tx
-    /// hash once the chain has executed (success or failure).
+    /// hash as soon as the sequencer accepts the submission; inclusion
+    /// is confirmed best-effort and never blocks the HTTP response.
     pub async fn drip(
         &self,
         recipient: &str,
@@ -349,12 +350,17 @@ impl Signer {
             .map_err(|e| SignerError::SubmitFailed(format!("submit: {e:#}")))?;
         let tx_hash_str = tx_hash.to_string();
 
-        // Poll for inclusion. Returns once the chain has indexed the
-        // tx (success or failure both count) or times out. The drip
-        // request is held open until inclusion so the user gets a
-        // useful response shape (`tx_hash` they can verify against
-        // the explorer immediately, not eventually).
-        self.wait_for_inclusion(&tx_hash_str).await?;
+        // Best-effort inclusion check. The submit already succeeded
+        // (the chain accepted the tx and issued `tx_hash`), so we do
+        // NOT propagate an inclusion-wait timeout as an error: holding
+        // the request open for the full inclusion window risks the edge
+        // proxy timing out the connection (502) even though the drip
+        // landed. The poll returns early as soon as the tx is indexed,
+        // so the happy path is still fast; on timeout we return the
+        // `tx_hash` anyway and the caller confirms inclusion via the
+        // explorer / `GET /v1/txs/{hash}`. A genuine submit failure is
+        // surfaced above by the `?` on `submit_raw_tx`.
+        let _ = self.wait_for_inclusion(&tx_hash_str).await;
 
         Ok(DripReceipt {
             tx_hash: tx_hash_str,
@@ -379,7 +385,10 @@ impl Signer {
     /// message so operators can `curl` the same URL to verify.
     async fn wait_for_inclusion(&self, tx_hash: &str) -> Result<(), SignerError> {
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-        const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+        // Bounded so a missed confirmation returns promptly. The drip
+        // response no longer depends on this completing (see `drip`),
+        // it only shortens the happy-path confirmation window.
+        const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(12);
 
         // For error message only -- not what `http_get` actually receives.
         let full_url = format!("{}/ledger/txs/{tx_hash}", self.chain_rpc_with_v1);
