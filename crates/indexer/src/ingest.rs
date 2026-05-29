@@ -25,7 +25,7 @@ use tracing::{debug, error, info, warn};
 use crate::client::NodeClient;
 use crate::db::{self, AddressRole};
 use crate::error::IndexerError;
-use crate::parser::{self, BountyEventKind, IndexerTx};
+use crate::parser::{self, BountyEventKind, ContractEventKind, IndexerTx};
 
 /// How long to wait between head-checks once we've caught up.
 const TAIL_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -338,18 +338,22 @@ async fn ingest_slot_transactions(
 /// - `BountyEvent` -> hydrate the bounty via the chain RPC and upsert
 ///   the `bounties` row; for claims also apply the escrow decrement +
 ///   claim_count bump; for terminal events zero the escrow.
+/// - `ContractEvent` -> hydrate the contract via the chain RPC and
+///   upsert the `contracts` row; for terminal events (accepted /
+///   dispute-resolved / cancelled / expired) zero the escrow.
 /// - Other kinds (Transfer, Unknown) -> nothing.
 ///
 /// Each step is best-effort: an FK failure or transient Postgres
 /// error on one bump doesn't abort the rest of the ingest, and the
 /// tx row itself is already committed by this point. A re-index can
 /// recompute counters from the source-of-truth tables (schemas /
-/// attestations / bounties) if drift is observed.
+/// attestations / bounties / contracts) if drift is observed.
 ///
-/// `client` is threaded through because the bounty path re-hydrates
-/// the full record from chain state (`Bounty/*` events are thin and
-/// don't carry the board schema / acceptance / status); the other
-/// kinds carry everything in their decoded event payload.
+/// `client` is threaded through because the bounty + contract paths
+/// re-hydrate the full record from chain state (`Bounty/*` and
+/// `Contracts/*` events are thin and don't carry the full record /
+/// status); the other kinds carry everything in their decoded event
+/// payload.
 async fn insert_resource_rows(
     client: &NodeClient,
     pool: &PgPool,
@@ -470,6 +474,59 @@ async fn insert_resource_rows(
                 }
             }
         }
+        IndexerTx::ContractEvent { contract_id, kind } => {
+            // Hydrate the full record on EVERY contract event: the
+            // events are thin, and the chain state is authoritative for
+            // status (incl. the Cancelled-vs-Expired disambiguation) +
+            // the static arbiter/criteria/pool/expiry fields. A 404 here
+            // means the chain doesn't (yet) know the contract — log and
+            // bail for this tx rather than insert a half-row; a later
+            // event or backfill re-hydrates. Mirrors the bounty arm.
+            let Some(rec) = client.contract_at(contract_id).await? else {
+                warn!(
+                    %contract_id,
+                    slot = slot_height,
+                    "contract hydrate returned 404; skipping contract upsert for this event"
+                );
+                return Ok(());
+            };
+            db::upsert_contract(
+                pool,
+                contract_id,
+                &rec,
+                slot_height,
+                &classified.hash,
+                slot_timestamp,
+            )
+            .await?;
+
+            // Per-event delta on top of the hydrated record. Contract
+            // escrow is all-or-nothing (no per-event decrement like
+            // bounty claims): it stays at the full pool until a terminal
+            // state drains it on-chain (payout to worker, or refund to
+            // poster), at which point we zero the column.
+            match kind {
+                ContractEventKind::Accepted
+                | ContractEventKind::DisputeResolved
+                | ContractEventKind::Cancelled
+                | ContractEventKind::Expired => {
+                    if let Err(e) = db::set_contract_escrow_zero(pool, contract_id).await {
+                        warn!(
+                            error = %e,
+                            %contract_id,
+                            "zeroing contract escrow on terminal event; escrow stale"
+                        );
+                    }
+                }
+                ContractEventKind::Posted
+                | ContractEventKind::Committed
+                | ContractEventKind::Delivered
+                | ContractEventKind::Rejected => {
+                    // Non-terminal: escrow stays at the full pool. The
+                    // status refresh from the hydrate above is enough.
+                }
+            }
+        }
         IndexerTx::Transfer(_) | IndexerTx::Unknown { .. } => {
             // No resource rows to insert for transfers or unknown
             // kinds. Address-summary counters are maintained by
@@ -504,7 +561,14 @@ async fn update_address_summaries(
         IndexerTx::RegisterAttestorSet(d) => Some(d.registered_by.as_str()),
         IndexerTx::RegisterSchema(d) => Some(d.owner.as_str()),
         IndexerTx::SubmitAttestation(d) => Some(d.submitter.as_str()),
-        IndexerTx::BountyEvent { .. } | IndexerTx::Unknown { .. } => None,
+        // Contract events, like bounty events, don't carry a single
+        // clean tx sender in the decoded shape (poster/worker/arbiter
+        // live in the hydrated record, not the parser variant); left
+        // out of address_summaries for Phase 2, same rationale as the
+        // bounty path.
+        IndexerTx::BountyEvent { .. }
+        | IndexerTx::ContractEvent { .. }
+        | IndexerTx::Unknown { .. } => None,
     };
 
     if let Some(addr) = sender {

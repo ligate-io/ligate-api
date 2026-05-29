@@ -7,7 +7,7 @@
 //! helpers without touching SQL directly.
 
 use chrono::{DateTime, TimeZone, Utc};
-use ligate_api_types::{BountyRecord, RollupInfo, SlotResponse};
+use ligate_api_types::{BountyRecord, ContractRecord, RollupInfo, SlotResponse};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -332,6 +332,18 @@ pub async fn insert_transaction(
                 d
             },
         ),
+        IndexerTx::ContractEvent { contract_id, kind } => (
+            // One `kind` string for every contract lifecycle tx; the
+            // specific transition lives in `details.event`. Same shape
+            // as the bounty forensic record. Authoritative contract
+            // state lives in the `contracts` table (hydrated
+            // separately).
+            "contract_event",
+            serde_json::json!({
+                "contract_id": contract_id,
+                "event": contract_event_kind_label(kind),
+            }),
+        ),
         IndexerTx::Unknown { event_keys } => (
             "unknown",
             // RFC 0002 reserves `raw_call_disc: [u8, u8]` for the
@@ -376,11 +388,13 @@ pub async fn insert_transaction(
         IndexerTx::RegisterAttestorSet(d) => Some(d.registered_by.as_str()),
         IndexerTx::RegisterSchema(d) => Some(d.owner.as_str()),
         IndexerTx::SubmitAttestation(d) => Some(d.submitter.as_str()),
-        // Bounty events don't carry a clean tx sender in the decoded
-        // shape (the poster/claimant lives in the hydrated record, not
-        // the parser variant); left NULL for Phase 1, same rationale
-        // as `update_address_summaries`.
-        IndexerTx::BountyEvent { .. } | IndexerTx::Unknown { .. } => None,
+        // Bounty + contract events don't carry a clean tx sender in the
+        // decoded shape (the poster/claimant/worker lives in the
+        // hydrated record, not the parser variant); left NULL for Phase
+        // 1/2, same rationale as `update_address_summaries`.
+        IndexerTx::BountyEvent { .. }
+        | IndexerTx::ContractEvent { .. }
+        | IndexerTx::Unknown { .. } => None,
     };
 
     // Protocol fee: flat per-kind constant from devnet-1's
@@ -400,12 +414,14 @@ pub async fn insert_transaction(
         IndexerTx::RegisterAttestorSet(_) => Some(50_000_000),
         IndexerTx::RegisterSchema(_) => Some(100_000_000),
         IndexerTx::SubmitAttestation(_) => Some(100_000),
-        // Bounty call protocol fees aren't pinned in the genesis table
-        // the other constants come from (the bounty module ships in
-        // ligate-chain v0.4.0+); leave None until the live config is
+        // Bounty + contract call protocol fees aren't pinned in the
+        // genesis table the other constants come from (both modules ship
+        // in ligate-chain v0.4.0+); leave None until the live config is
         // known rather than guess. The escrow/payout flows are tracked
-        // in the `bounties` table, not this column.
-        IndexerTx::BountyEvent { .. } | IndexerTx::Unknown { .. } => None,
+        // in the `bounties` / `contracts` tables, not this column.
+        IndexerTx::BountyEvent { .. }
+        | IndexerTx::ContractEvent { .. }
+        | IndexerTx::Unknown { .. } => None,
     };
 
     // Gas fee paid: on devnet the chain meters but doesn't bill
@@ -616,6 +632,23 @@ fn bounty_event_kind_label(kind: &crate::parser::BountyEventKind) -> &'static st
     }
 }
 
+/// Snake-case label for a [`crate::parser::ContractEventKind`], used as
+/// the `details.event` discriminator on the `transactions` row for a
+/// contract tx. Mirrors [`bounty_event_kind_label`].
+fn contract_event_kind_label(kind: &crate::parser::ContractEventKind) -> &'static str {
+    use crate::parser::ContractEventKind as K;
+    match kind {
+        K::Posted => "posted",
+        K::Committed => "committed",
+        K::Delivered => "delivered",
+        K::Accepted => "accepted",
+        K::Rejected => "rejected",
+        K::DisputeResolved => "dispute_resolved",
+        K::Cancelled => "cancelled",
+        K::Expired => "expired",
+    }
+}
+
 /// Map the chain's PascalCase bounty status to the lowercase
 /// `bounties.status` CHECK enum (`'open'`/`'exhausted'`/`'expired'`/
 /// `'cancelled'`/`'finalised'`).
@@ -763,6 +796,142 @@ pub async fn apply_bounty_claim(
 /// this only settles the escrow column. No-op if the row is missing.
 pub async fn set_bounty_escrow_zero(pool: &PgPool, id: &str) -> Result<()> {
     sqlx::query("UPDATE bounties SET escrow_remaining_nano = '0' WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// ---- contracts -------------------------------------------------------------
+
+/// Map the chain's PascalCase contract status to the lowercase
+/// `contracts.status` CHECK enum (`'open'`/`'committed'`/`'delivered'`/
+/// `'accepted'`/`'rejected'`/`'disputed'`/`'cancelled'`/`'expired'`).
+///
+/// Unknown values (a future chain rev adds a status) fall back to
+/// `'open'` rather than failing the insert — same fail-soft rationale
+/// as [`map_bounty_status`]. A new status would be added here in the
+/// same PR that adds it to the CHECK constraint.
+fn map_contract_status(chain_status: &str) -> &'static str {
+    match chain_status {
+        "Open" => "open",
+        "Committed" => "committed",
+        "Delivered" => "delivered",
+        "Accepted" => "accepted",
+        "Rejected" => "rejected",
+        "Disputed" => "disputed",
+        "Cancelled" => "cancelled",
+        "Expired" => "expired",
+        _ => "open",
+    }
+}
+
+/// Stringify the chain's `criteria_doc_hash` JSON value to the TEXT form
+/// stored in `contracts.criteria_doc_hash`. The chain serialises the
+/// `[u8; 32]` as a hex string today (so the common path is "already a
+/// string, strip the JSON quotes"); any non-string encoding falls back
+/// to the JSON repr verbatim. Mirrors the `payload_shape_hash` handling
+/// in `parser.rs`.
+fn stringify_criteria_doc_hash(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Upsert one row into `contracts` from a hydrated [`ContractRecord`].
+///
+/// Idempotent on (id) primary key. The chain `Contracts/*` events are
+/// thin (id + addresses/amounts), so the indexer hydrates the full
+/// record via `NodeClient::contract_at` and writes it here on EVERY
+/// event — ContractPosted (initial insert) and every subsequent
+/// transition (status refresh, including the Cancelled-vs-Expired
+/// disambiguation the events alone can't make).
+///
+/// **INSERT vs CONFLICT split** (mirrors [`upsert_bounty`]). On first
+/// insert (a `ContractPosted`) we seed `escrow_remaining_nano = pool`.
+/// On CONFLICT (a later event re-hydrating) we refresh only the static
+/// fields + `status`, and deliberately DO NOT touch
+/// `escrow_remaining_nano` — that's owned by [`set_contract_escrow_zero`]
+/// (the contract module's escrow accounting is all-or-nothing: escrow
+/// stays at the full pool until a terminal state drains it to zero, so
+/// there's no per-event decrement like bounty claims). The hydrate's
+/// `pool` is the ORIGINAL pool, not the live remaining escrow, so
+/// overwriting `escrow_remaining_nano` from it would resurrect drained
+/// escrow.
+///
+/// **No schema FK.** Unlike bounties (anchored to a board schema),
+/// contracts aren't schema-anchored — the poster names a specific
+/// arbiter address at post time. So this table has no `REFERENCES
+/// schemas(id)`; `arbiter` is just a named address column. `posted_at_tx`
+/// references `transactions(hash)` and the ingest loop inserts the tx
+/// row before resource rows, so that FK holds in normal operation. On
+/// FK violation the insert errors and the caller logs-and-continues.
+pub async fn upsert_contract(
+    pool: &PgPool,
+    id: &str,
+    record: &ContractRecord,
+    posted_at_slot: u64,
+    posted_at_tx: &str,
+    posted_at_timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let status = map_contract_status(&record.status);
+    let criteria_doc_hash = stringify_criteria_doc_hash(&record.criteria_doc_hash);
+
+    sqlx::query(
+        "INSERT INTO contracts (
+            id, poster, arbiter, criteria_doc_hash, pool_nano,
+            escrow_remaining_nano, arbiter_fee_bps, status, expiry_da_height,
+            dispute_window_blocks, posted_at_slot, posted_at_tx, posted_at_timestamp
+         ) VALUES (
+            $1, $2, $3, $4, $5,
+            -- On first insert escrow starts at the full pool; the
+            -- terminal path (set_contract_escrow_zero) drains it.
+            $5, $6, $7, $8,
+            $9, $10, $11, $12
+         )
+         ON CONFLICT (id) DO UPDATE SET
+            poster                = EXCLUDED.poster,
+            arbiter               = EXCLUDED.arbiter,
+            criteria_doc_hash     = EXCLUDED.criteria_doc_hash,
+            pool_nano             = EXCLUDED.pool_nano,
+            arbiter_fee_bps       = EXCLUDED.arbiter_fee_bps,
+            -- Status refresh is the whole point of re-hydrating on every
+            -- event. escrow_remaining_nano is intentionally NOT in this
+            -- SET — it's owned by the terminal path and the hydrate's
+            -- `pool` is the original pool, not the live remaining escrow.
+            status                = EXCLUDED.status,
+            expiry_da_height      = EXCLUDED.expiry_da_height,
+            dispute_window_blocks = EXCLUDED.dispute_window_blocks",
+    )
+    .bind(id)
+    .bind(&record.poster)
+    .bind(&record.arbiter)
+    .bind(&criteria_doc_hash)
+    .bind(&record.pool)
+    .bind(i32::from(record.arbiter_fee_bps))
+    .bind(status)
+    .bind(record.expiry_da_height as i64)
+    .bind(i32::try_from(record.dispute_window_blocks).unwrap_or(i32::MAX))
+    .bind(posted_at_slot as i64)
+    .bind(posted_at_tx)
+    .bind(posted_at_timestamp)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Zero out a contract's remaining escrow, for the terminal
+/// `DeliveryAccepted` (poster-accept or auto-accept) /
+/// `ContractDisputeResolved` / `ContractCancelled` / `ContractExpired`
+/// transitions — at each of these the chain has drained the module
+/// escrow (payout to the worker, or refund to the poster).
+///
+/// The `status` itself comes from the hydrate in [`upsert_contract`];
+/// this only settles the escrow column. No-op if the row is missing.
+/// Mirrors [`set_bounty_escrow_zero`].
+pub async fn set_contract_escrow_zero(pool: &PgPool, id: &str) -> Result<()> {
+    sqlx::query("UPDATE contracts SET escrow_remaining_nano = '0' WHERE id = $1")
         .bind(id)
         .execute(pool)
         .await?;

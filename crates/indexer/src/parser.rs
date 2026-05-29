@@ -39,7 +39,9 @@ use ligate_api_types::{
     AttestationAttestationSubmittedEvent, AttestationAttestorSetRegisteredEvent,
     AttestationSchemaRegisteredEvent, BankTokenTransferredEvent, BountyClaimedEvent,
     BountyDisputedEvent, BountyExpiredEvent, BountyFinalisedEvent, BountyPostedEvent,
-    DisputeResolvedEvent, LedgerEvent, LedgerTx,
+    ContractCancelledEvent, ContractDeliveredEvent, ContractDisputeResolvedEvent,
+    ContractExpiredEvent, ContractPostedEvent, DeliveryAcceptedEvent, DeliveryRejectedEvent,
+    DisputeResolvedEvent, LedgerEvent, LedgerTx, WorkerCommittedEvent,
 };
 
 /// Event-key constant for the Bank module's `TokenTransferred` event.
@@ -57,6 +59,28 @@ const KEY_BOUNTY_DISPUTED: &str = "Bounty/BountyDisputed";
 const KEY_BOUNTY_DISPUTE_RESOLVED: &str = "Bounty/DisputeResolved";
 const KEY_BOUNTY_EXPIRED: &str = "Bounty/BountyExpired";
 const KEY_BOUNTY_FINALISED: &str = "Bounty/BountyFinalised";
+
+/// Event keys emitted by the Contract module (chain contract primitive,
+/// ligate-chain v0.4.0+). **Critical:** the contract module's struct is
+/// named `Contracts` (plural — see ligate-chain
+/// `crates/modules/contract/src/lib.rs`), and the SDK derives the
+/// event-key prefix from the struct identifier verbatim
+/// (`format!("{struct_ident}/{variant}")`, per
+/// `sov-modules-api::module::event_key` + the `ModuleInfo` derive's
+/// `ModulePrefix::new_module(.., stringify!(#struct_ident))`). So the
+/// prefix is `Contracts/`, NOT `Contract/`. (Bounty's struct is
+/// `Bounty`, hence `Bounty/`.) Getting this wrong = a silent miss where
+/// every contract event falls through to `Unknown`. Verified against
+/// the SDK macro source + the `CONTRACTS_DISCRIMINANT` (ScreamingSnake
+/// of `Contracts`) in `constants.toml`.
+const KEY_CONTRACT_POSTED: &str = "Contracts/ContractPosted";
+const KEY_CONTRACT_WORKER_COMMITTED: &str = "Contracts/WorkerCommitted";
+const KEY_CONTRACT_DELIVERED: &str = "Contracts/ContractDelivered";
+const KEY_CONTRACT_DELIVERY_ACCEPTED: &str = "Contracts/DeliveryAccepted";
+const KEY_CONTRACT_DELIVERY_REJECTED: &str = "Contracts/DeliveryRejected";
+const KEY_CONTRACT_DISPUTE_RESOLVED: &str = "Contracts/ContractDisputeResolved";
+const KEY_CONTRACT_CANCELLED: &str = "Contracts/ContractCancelled";
+const KEY_CONTRACT_EXPIRED: &str = "Contracts/ContractExpired";
 
 /// Event keys emitted by the Attestation module's three CallMessage
 /// paths (ligate-chain PR #297). The strings match the auto-generated
@@ -126,6 +150,18 @@ pub enum IndexerTx {
         /// What happened to the bounty in this tx.
         kind: BountyEventKind,
     },
+    /// A `Contracts/*` lifecycle event. Carries the affected contract id
+    /// plus a [`ContractEventKind`] discriminator the ingest step uses
+    /// to decide which per-event delta to apply on top of the
+    /// re-hydrated record (escrow-zeroing on terminal states). See
+    /// [`ContractEventKind`]; the contract id + kind come from the first
+    /// recognised contract event in the tx.
+    ContractEvent {
+        /// Bech32m `lct1...` id of the contract the tx touched.
+        contract_id: String,
+        /// What happened to the contract in this tx.
+        kind: ContractEventKind,
+    },
     /// Catch-all. Either no events were emitted (e.g. a no-op tx), or
     /// the events present don't match any kind the parser knows. The
     /// indexer writes this as `kind = "unknown"` with the raw event
@@ -165,6 +201,47 @@ pub enum BountyEventKind {
     Expired,
     /// `Bounty/BountyFinalised`.
     Finalised,
+}
+
+/// Which contract lifecycle transition a [`IndexerTx::ContractEvent`]
+/// represents.
+///
+/// Unlike bounty claims, contract events are NOT batched (one contract
+/// per tx, one lifecycle transition per tx), so this is a plain
+/// discriminator with no summed accounting. The ingest step re-hydrates
+/// the authoritative `status` from chain state on every event; the kind
+/// only decides whether to additionally zero the escrow column (the
+/// terminal `Accepted` / `Cancelled` / `Expired` / dispute-`Resolved`
+/// states drain escrow on-chain via payout / refund).
+///
+/// **`Accepted` covers two chain calls.** Both the poster's explicit
+/// `AcceptDelivery` and the permissionless `FinalizeDelivery` auto-accept
+/// sweep emit the same `Contracts/DeliveryAccepted` event, so they map to
+/// the same `Accepted` kind here — the indexer can't (and needn't)
+/// distinguish them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContractEventKind {
+    /// `Contracts/ContractPosted`.
+    Posted,
+    /// `Contracts/WorkerCommitted`.
+    Committed,
+    /// `Contracts/ContractDelivered`.
+    Delivered,
+    /// `Contracts/DeliveryAccepted` (poster-accept OR auto-accept
+    /// finalize). Terminal: escrow drained to the worker on-chain.
+    Accepted,
+    /// `Contracts/DeliveryRejected`. Transitions to Disputed; escrow
+    /// stays locked until the arbiter resolves.
+    Rejected,
+    /// `Contracts/ContractDisputeResolved`. Terminal: pool + bond
+    /// settled per the arbiter's decision; escrow drained on-chain.
+    DisputeResolved,
+    /// `Contracts/ContractCancelled`. Terminal: escrow refunded to the
+    /// poster on-chain.
+    Cancelled,
+    /// `Contracts/ContractExpired`. Terminal: escrow refunded to the
+    /// poster on-chain.
+    Expired,
 }
 
 /// Decoded transfer details. Mirrors RFC 0002's `Tx.details` shape for
@@ -291,19 +368,22 @@ pub struct ClassifiedTx {
 /// 2. `Attestation/SchemaRegistered`      -> [`IndexerTx::RegisterSchema`]
 /// 3. `Attestation/AttestationSubmitted`  -> [`IndexerTx::SubmitAttestation`]
 /// 4. any `Bounty/*` event                -> [`IndexerTx::BountyEvent`]
-/// 5. `Bank/TokenTransferred`             -> [`IndexerTx::Transfer`]
-/// 6. otherwise -> [`IndexerTx::Unknown`] capturing the event keys
+/// 5. any `Contracts/*` event             -> [`IndexerTx::ContractEvent`]
+/// 6. `Bank/TokenTransferred`             -> [`IndexerTx::Transfer`]
+/// 7. otherwise -> [`IndexerTx::Unknown`] capturing the event keys
 ///    we saw, for forensic lookup
 ///
 /// **Semantic events win over Bank events.** A `register_schema` tx
 /// emits both an `Attestation/SchemaRegistered` (semantic) and a
 /// `Bank/TokenTransferred` (the fee payment to treasury); a
 /// `PostBounty` tx emits a `Bounty/BountyPosted` AND a
-/// `Bank/TokenTransferred` for the escrow deposit. Without the
-/// preference the parser would classify either as a Transfer of the
-/// fee/escrow, dropping the semantic event. We walk events looking
-/// for Attestation- then Bounty-module keys first; only if none is
-/// found do we fall through to the bank check.
+/// `Bank/TokenTransferred` for the escrow deposit; a `PostContract` tx
+/// emits a `Contracts/ContractPosted` AND a `Bank/TokenTransferred` for
+/// the escrow deposit. Without the preference the parser would classify
+/// any of them as a Transfer of the fee/escrow, dropping the semantic
+/// event. We walk events looking for Attestation- then Bounty- then
+/// Contract-module keys first; only if none is found do we fall through
+/// to the bank check.
 fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
     // Pass 1: look for an Attestation-module event. These are the
     // semantic events for the register/submit call types.
@@ -403,7 +483,14 @@ fn classify_events(events: &[&LedgerEvent]) -> IndexerTx {
         return bounty;
     }
 
-    // Pass 3: no semantic event matched; fall back to the bank check
+    // Pass 3: look for Contract-module events. Same rationale as the
+    // bounty pass — a PostContract / payout / refund tx also emits a
+    // `Bank/TokenTransferred`, and the semantic contract event must win.
+    if let Some(contract) = classify_contract_events(events) {
+        return contract;
+    }
+
+    // Pass 4: no semantic event matched; fall back to the bank check
     // for plain transfers.
     for ev in events {
         if ev.key == KEY_BANK_TOKEN_TRANSFERRED {
@@ -521,6 +608,97 @@ fn classify_bounty_events(events: &[&LedgerEvent]) -> Option<IndexerTx> {
         kind
     };
     Some(IndexerTx::BountyEvent { bounty_id, kind })
+}
+
+/// Scan `events` for `Contracts/*` keys and, if any are present,
+/// collapse them into a single [`IndexerTx::ContractEvent`].
+///
+/// Returns `None` when no contract event is present (caller falls
+/// through to the bank check). The contract id and discriminator come
+/// from the FIRST recognised contract event in the tx; the ingest step
+/// re-hydrates the full record by id, so a single representative
+/// classification is enough. Unlike bounty claims, contract lifecycle
+/// txs aren't batched (one contract, one transition per tx), so there's
+/// no summed accounting here.
+///
+/// Decodes lazily and tolerates a malformed payload by skipping that
+/// event (the tx falls through to `Unknown` if NO contract event
+/// decodes), matching the never-crash-mid-slot policy of the
+/// attestation + bounty paths.
+fn classify_contract_events(events: &[&LedgerEvent]) -> Option<IndexerTx> {
+    let mut first: Option<(String, ContractEventKind)> = None;
+
+    for ev in events {
+        match ev.key.as_str() {
+            KEY_CONTRACT_POSTED => {
+                if let Ok(p) = serde_json::from_value::<ContractPostedEvent>(ev.value.clone()) {
+                    first.get_or_insert((p.contract_posted.contract_id, ContractEventKind::Posted));
+                }
+            }
+            KEY_CONTRACT_WORKER_COMMITTED => {
+                if let Ok(p) = serde_json::from_value::<WorkerCommittedEvent>(ev.value.clone()) {
+                    first.get_or_insert((
+                        p.worker_committed.contract_id,
+                        ContractEventKind::Committed,
+                    ));
+                }
+            }
+            KEY_CONTRACT_DELIVERED => {
+                if let Ok(p) = serde_json::from_value::<ContractDeliveredEvent>(ev.value.clone()) {
+                    first.get_or_insert((
+                        p.contract_delivered.contract_id,
+                        ContractEventKind::Delivered,
+                    ));
+                }
+            }
+            KEY_CONTRACT_DELIVERY_ACCEPTED => {
+                if let Ok(p) = serde_json::from_value::<DeliveryAcceptedEvent>(ev.value.clone()) {
+                    first.get_or_insert((
+                        p.delivery_accepted.contract_id,
+                        ContractEventKind::Accepted,
+                    ));
+                }
+            }
+            KEY_CONTRACT_DELIVERY_REJECTED => {
+                if let Ok(p) = serde_json::from_value::<DeliveryRejectedEvent>(ev.value.clone()) {
+                    first.get_or_insert((
+                        p.delivery_rejected.contract_id,
+                        ContractEventKind::Rejected,
+                    ));
+                }
+            }
+            KEY_CONTRACT_DISPUTE_RESOLVED => {
+                if let Ok(p) =
+                    serde_json::from_value::<ContractDisputeResolvedEvent>(ev.value.clone())
+                {
+                    first.get_or_insert((
+                        p.contract_dispute_resolved.contract_id,
+                        ContractEventKind::DisputeResolved,
+                    ));
+                }
+            }
+            KEY_CONTRACT_CANCELLED => {
+                if let Ok(p) = serde_json::from_value::<ContractCancelledEvent>(ev.value.clone()) {
+                    first.get_or_insert((
+                        p.contract_cancelled.contract_id,
+                        ContractEventKind::Cancelled,
+                    ));
+                }
+            }
+            KEY_CONTRACT_EXPIRED => {
+                if let Ok(p) = serde_json::from_value::<ContractExpiredEvent>(ev.value.clone()) {
+                    first.get_or_insert((
+                        p.contract_expired.contract_id,
+                        ContractEventKind::Expired,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (contract_id, kind) = first?;
+    Some(IndexerTx::ContractEvent { contract_id, kind })
 }
 
 #[cfg(test)]
@@ -1109,6 +1287,296 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ---- contract events ---------------------------------------------------
+
+    /// Build a `Contracts/<variant>` ledger event with the given key +
+    /// externally-tagged value. NOTE the module name is `Contracts`
+    /// (plural) — this is the whole point of the prefix gotcha.
+    fn contract_event(number: u64, key: &str, value: serde_json::Value) -> LedgerEvent {
+        LedgerEvent {
+            r#type: "event".into(),
+            number,
+            key: key.into(),
+            value,
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Contracts".into(),
+            },
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_contract_posted() {
+        // Externally-tagged enum: PascalCase variant key, raw bech32m
+        // addresses, u128 string amounts. The `Contracts/` (plural)
+        // prefix is what the SDK emits for a module struct named
+        // `Contracts`.
+        let event = contract_event(
+            1,
+            KEY_CONTRACT_POSTED,
+            serde_json::json!({
+                "ContractPosted": {
+                    "contract_id": "lct1abc",
+                    "poster": "lig1poster",
+                    "arbiter": "lig1arbiter",
+                    "pool": "5000000000"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::ContractEvent { contract_id, kind } => {
+                assert_eq!(contract_id, "lct1abc");
+                assert_eq!(kind, ContractEventKind::Posted);
+            }
+            other => panic!("expected ContractEvent::Posted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_worker_committed() {
+        let event = contract_event(
+            1,
+            KEY_CONTRACT_WORKER_COMMITTED,
+            serde_json::json!({
+                "WorkerCommitted": {
+                    "contract_id": "lct1abc",
+                    "worker": "lig1worker",
+                    "commit_hash": "0xc0ffee",
+                    "bond": "250000000"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::ContractEvent { contract_id, kind } => {
+                assert_eq!(contract_id, "lct1abc");
+                assert_eq!(kind, ContractEventKind::Committed);
+            }
+            other => panic!("expected ContractEvent::Committed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_contract_delivered() {
+        let event = contract_event(
+            1,
+            KEY_CONTRACT_DELIVERED,
+            serde_json::json!({
+                "ContractDelivered": {
+                    "contract_id": "lct1abc",
+                    "worker": "lig1worker",
+                    "deliverable_attestation_id": "lat1xyz"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::ContractEvent { contract_id, kind } => {
+                assert_eq!(contract_id, "lct1abc");
+                assert_eq!(kind, ContractEventKind::Delivered);
+            }
+            other => panic!("expected ContractEvent::Delivered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_delivery_accepted() {
+        let event = contract_event(
+            1,
+            KEY_CONTRACT_DELIVERY_ACCEPTED,
+            serde_json::json!({
+                "DeliveryAccepted": {
+                    "contract_id": "lct1abc",
+                    "worker": "lig1worker",
+                    "payout": "5000000000"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::ContractEvent { contract_id, kind } => {
+                assert_eq!(contract_id, "lct1abc");
+                assert_eq!(kind, ContractEventKind::Accepted);
+            }
+            other => panic!("expected ContractEvent::Accepted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_delivery_rejected() {
+        let event = contract_event(
+            1,
+            KEY_CONTRACT_DELIVERY_REJECTED,
+            serde_json::json!({
+                "DeliveryRejected": {
+                    "contract_id": "lct1abc",
+                    "worker": "lig1worker",
+                    "reason": "CriteriaMismatch"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::ContractEvent { contract_id, kind } => {
+                assert_eq!(contract_id, "lct1abc");
+                assert_eq!(kind, ContractEventKind::Rejected);
+            }
+            other => panic!("expected ContractEvent::Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_contract_dispute_resolved() {
+        let event = contract_event(
+            1,
+            KEY_CONTRACT_DISPUTE_RESOLVED,
+            serde_json::json!({
+                "ContractDisputeResolved": {
+                    "contract_id": "lct1abc",
+                    "decision": "AcceptDelivery",
+                    "winner": "lig1worker"
+                }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::ContractEvent { contract_id, kind } => {
+                assert_eq!(contract_id, "lct1abc");
+                assert_eq!(kind, ContractEventKind::DisputeResolved);
+            }
+            other => panic!("expected ContractEvent::DisputeResolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_contract_cancelled() {
+        let event = contract_event(
+            1,
+            KEY_CONTRACT_CANCELLED,
+            serde_json::json!({
+                "ContractCancelled": { "contract_id": "lct1abc", "refunded_to_poster": "5000000000" }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::ContractEvent { contract_id, kind } => {
+                assert_eq!(contract_id, "lct1abc");
+                assert_eq!(kind, ContractEventKind::Cancelled);
+            }
+            other => panic!("expected ContractEvent::Cancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_recognises_contract_expired() {
+        let event = contract_event(
+            1,
+            KEY_CONTRACT_EXPIRED,
+            serde_json::json!({
+                "ContractExpired": { "contract_id": "lct1abc", "refunded_to_poster": "5000000000" }
+            }),
+        );
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::ContractEvent { contract_id, kind } => {
+                assert_eq!(contract_id, "lct1abc");
+                assert_eq!(kind, ContractEventKind::Expired);
+            }
+            other => panic!("expected ContractEvent::Expired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contract_event_wins_over_bank_escrow_transfer() {
+        // A PostContract tx emits BOTH a Contracts/ContractPosted
+        // (semantic) AND a Bank/TokenTransferred for the escrow deposit.
+        // The parser must pick the contract event, not the escrow
+        // transfer.
+        let semantic = contract_event(
+            1,
+            KEY_CONTRACT_POSTED,
+            serde_json::json!({
+                "ContractPosted": {
+                    "contract_id": "lct1abc",
+                    "poster": "lig1poster",
+                    "arbiter": "lig1arbiter",
+                    "pool": "5000000000"
+                }
+            }),
+        );
+        let escrow = LedgerEvent {
+            r#type: "event".into(),
+            number: 2,
+            key: KEY_BANK_TOKEN_TRANSFERRED.into(),
+            value: serde_json::json!({
+                "token_transferred": {
+                    "from": {"user": "lig1poster"},
+                    "to":   {"user": "lig1escrow"},
+                    "coins": {"amount": "5000000000", "token_id": "token_1lgt"}
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Bank".into(),
+            },
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
+        };
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&semantic, &escrow]).expect("not skipped");
+        assert!(matches!(
+            classified.kind,
+            IndexerTx::ContractEvent {
+                kind: ContractEventKind::Posted,
+                ..
+            }
+        ));
+    }
+
+    /// The singular `Contract/` prefix (a plausible-but-wrong guess)
+    /// must NOT classify as a contract event — it falls through to
+    /// `Unknown`. This pins the plural-vs-singular gotcha as a
+    /// regression test: if someone "fixes" the consts to `Contract/`,
+    /// this fails.
+    #[test]
+    fn singular_contract_prefix_does_not_match() {
+        let event = LedgerEvent {
+            r#type: "event".into(),
+            number: 1,
+            key: "Contract/ContractPosted".into(), // WRONG (singular)
+            value: serde_json::json!({
+                "ContractPosted": {
+                    "contract_id": "lct1abc",
+                    "poster": "lig1poster",
+                    "arbiter": "lig1arbiter",
+                    "pool": "5000000000"
+                }
+            }),
+            module: ligate_api_types::ModuleRef {
+                r#type: "moduleRef".into(),
+                name: "Contract".into(),
+            },
+            tx_hash: "ltx1deadbeef0000000000000000000000000000000000000000000000000".into(),
+        };
+        let tx = fixture_tx("successful");
+        let classified = classify_tx(&tx, &[&event]).expect("not skipped");
+        match classified.kind {
+            IndexerTx::Unknown { event_keys } => {
+                assert_eq!(event_keys, vec!["Contract/ContractPosted"]);
+            }
+            other => panic!("expected Unknown for singular prefix, got {other:?}"),
+        }
     }
 
     #[test]

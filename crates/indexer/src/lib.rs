@@ -36,7 +36,8 @@ pub use db::connect;
 pub use error::IndexerError;
 pub use ingest::run as run_ingest;
 pub use parser::{
-    classify_tx, outcome_of, BountyEventKind, ClassifiedTx, IndexerTransfer, IndexerTx, TxOutcome,
+    classify_tx, outcome_of, BountyEventKind, ClassifiedTx, ContractEventKind, IndexerTransfer,
+    IndexerTx, TxOutcome,
 };
 pub use sqlx::PgPool;
 

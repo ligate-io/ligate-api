@@ -1717,3 +1717,165 @@ fn bounty_row_to_response(row: queries::BountyRow) -> responses::BountyDetailRes
         last_claim_at_slot: row.last_claim_at_slot,
     }
 }
+
+// ---- Contracts --------------------------------------------------------------
+//
+// `/v1/contracts` (list) + `/v1/contracts/{contractId}` (detail). Reads
+// from the `contracts` table the indexer populates on `Contracts/*`
+// chain events. Mirrors the bounty surface; the list adds `?poster=` +
+// `?arbiter=` filters (contracts aren't schema-anchored, so there's no
+// `?board=`).
+
+/// Cursor shape for `/v1/contracts` (compound: descending by
+/// `(posted_at_slot, id)`). Same opaque base64url-JSON envelope as the
+/// other list cursors.
+#[derive(Debug, Serialize, Deserialize)]
+struct ContractsCursor {
+    slot: u64,
+    id: String,
+}
+
+/// `/v1/contracts` query params: pagination plus optional `?status=`
+/// (filter to a single lifecycle state), `?poster=` (filter to a single
+/// poster address), and `?arbiter=` (filter to a single named arbiter
+/// address) filters.
+///
+/// **Filter values.** `status` is one of `open`/`committed`/`delivered`/
+/// `accepted`/`rejected`/`disputed`/`cancelled`/`expired`; `poster` /
+/// `arbiter` are verbatim bech32m `lig1...` strings. Unknown values
+/// silently return zero rows (no 400) — same forward-compat rationale as
+/// `?kind=` on `/v1/txs`.
+#[derive(Debug, Deserialize)]
+pub struct ContractsListParams {
+    pub limit: Option<u32>,
+    pub before: Option<String>,
+    /// Filter rows to a single `status`. `None` returns all states.
+    pub status: Option<String>,
+    /// Filter rows to a single `poster`. `None` returns all posters.
+    pub poster: Option<String>,
+    /// Filter rows to a single named `arbiter`. `None` returns all.
+    pub arbiter: Option<String>,
+}
+
+/// `GET /v1/contracts/{contractId}` — a single contract by bech32m
+/// `lct1...` id. 404 when the indexer hasn't seen a `Contracts/*` event
+/// for it.
+pub async fn contract_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let row = match queries::contract_by_id(&state.pg, &id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "contract not found",
+                    "tracking": null
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, %id, "contract_by_id in /v1/contracts/{{contractId}}");
+            return internal_error();
+        }
+    };
+
+    cached(Json(contract_row_to_response(row)), TTL_MODEST_SECS)
+}
+
+/// `GET /v1/contracts` — descending list of contracts with compound
+/// cursor pagination. Optional `?status=` + `?poster=` + `?arbiter=`
+/// filters.
+///
+/// Ordered by `(posted_at_slot DESC, id DESC)`. Cached at
+/// `TTL_MODEST_SECS` because contract status flips on lifecycle events
+/// at a multi-second cadence, like `/v1/bounties`.
+pub async fn contracts_list(
+    State(state): State<AppState>,
+    Query(params): Query<ContractsListParams>,
+) -> impl IntoResponse {
+    let limit = cursor::resolve_limit(params.limit);
+    let before = params
+        .before
+        .as_deref()
+        .and_then(cursor::decode::<ContractsCursor>)
+        .map(|c| queries::ContractsCursor {
+            posted_at_slot: c.slot as i64,
+            id: c.id,
+        });
+
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows = match queries::contracts_page(
+        &state.pg,
+        params.status.as_deref(),
+        params.poster.as_deref(),
+        params.arbiter.as_deref(),
+        before,
+        limit_plus_one,
+    )
+    .await
+    {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(
+                error = %e, status = ?params.status, poster = ?params.poster,
+                arbiter = ?params.arbiter,
+                "contracts_page in /v1/contracts"
+            );
+            return internal_error();
+        }
+    };
+
+    let has_more = rows.len() as i64 > limit as i64;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+
+    let next = if has_more {
+        rows.last().and_then(|r| {
+            cursor::encode(&ContractsCursor {
+                slot: r.posted_at_slot as u64,
+                id: r.id.clone(),
+            })
+            .ok()
+        })
+    } else {
+        None
+    };
+
+    let data: Vec<responses::ContractDetailResponse> =
+        rows.into_iter().map(contract_row_to_response).collect();
+
+    cached(
+        Json(Page {
+            data,
+            pagination: Pagination { next, limit },
+        }),
+        TTL_MODEST_SECS,
+    )
+}
+
+/// Map a `contracts` row to the RFC-0002-style wire shape.
+fn contract_row_to_response(row: queries::ContractRow) -> responses::ContractDetailResponse {
+    responses::ContractDetailResponse {
+        id: row.id,
+        poster: row.poster,
+        arbiter: row.arbiter,
+        criteria_doc_hash: row.criteria_doc_hash,
+        pool_nano: row.pool_nano,
+        escrow_remaining_nano: row.escrow_remaining_nano,
+        arbiter_fee_bps: row.arbiter_fee_bps as u16,
+        status: row.status,
+        expiry_da_height: row.expiry_da_height,
+        dispute_window_blocks: row.dispute_window_blocks,
+        posted_at: RegisteredAtResponse {
+            block_height: row.posted_at_slot as u64,
+            tx_hash: row.posted_at_tx,
+            timestamp: row
+                .posted_at_timestamp
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+        },
+    }
+}

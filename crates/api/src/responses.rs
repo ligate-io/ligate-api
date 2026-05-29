@@ -551,3 +551,48 @@ pub struct BountyDetailResponse {
     /// been claimed.
     pub last_claim_at_slot: Option<i64>,
 }
+
+// ---- contract detail / list -------------------------------------------------
+
+/// One contract, served at `GET /v1/contracts/{contractId}` and as each
+/// element of the list at `GET /v1/contracts`.
+///
+/// Mirrors the `contracts` table the indexer populates from
+/// `Contracts/*` chain events (with the full record hydrated from chain
+/// state). u128 amounts are decimal strings per RFC 0002. Unlike
+/// [`BountyDetailResponse`], a contract has no board schema (it's not
+/// schema-anchored) — it instead names a specific `arbiter` address and
+/// references an off-chain `criteria_doc_hash`.
+#[derive(Debug, serde::Serialize)]
+pub struct ContractDetailResponse {
+    /// Bech32m `lct1...` contract id.
+    pub id: String,
+    /// Poster address (buyer), bech32m `lig1...`. Receives refunds on
+    /// cancel/expiry and bond payouts on rejected-dispute resolutions.
+    pub poster: String,
+    /// Arbiter address named at post time, bech32m `lig1...`.
+    /// Authorised to resolve disputes on this contract.
+    pub arbiter: String,
+    /// 32-byte content hash of the off-chain criteria document, echoed
+    /// verbatim from the chain event (hex string today).
+    pub criteria_doc_hash: String,
+    /// Original pool size at PostContract time, AVOW nanos (decimal
+    /// string for u128).
+    pub pool_nano: String,
+    /// Remaining escrow at the indexer's last seen event (decimal
+    /// string). Stays at the full pool until a terminal state drains it;
+    /// `0` after accept/dispute-resolve/cancel/expiry.
+    pub escrow_remaining_nano: String,
+    /// Arbiter fee in basis points (paid only if the arbiter resolves a
+    /// dispute).
+    pub arbiter_fee_bps: u16,
+    /// Lifecycle state: `open`/`committed`/`delivered`/`accepted`/
+    /// `rejected`/`disputed`/`cancelled`/`expired`.
+    pub status: String,
+    /// DA-layer block height the contract expires at.
+    pub expiry_da_height: i64,
+    /// Acceptance window in chain blocks before a delivery auto-accepts.
+    pub dispute_window_blocks: i32,
+    /// Provenance of the PostContract tx.
+    pub posted_at: RegisteredAtResponse,
+}
