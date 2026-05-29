@@ -26,7 +26,7 @@ freeze       = [1, 1]
 # value finalised at TGE; devnet uses 4242 (distinct from the SDK
 # demo's 4321 so a misconfigured client failing back to demo defaults
 # is obvious in logs). Per #54, the user-facing string identifier is
-# `ligate-devnet-2` / `ligate-1` and lives in the rollup config TOML,
+# `ligate-devnet-3` / `ligate-1` and lives in the rollup config TOML,
 # not here.
 CHAIN_ID = 4242
 CHAIN_NAME = "Ligate"
@@ -85,22 +85,21 @@ GAS_FORCED_SEQUENCER_REGISTRATION_COST = [100000, 100000]
 
 # The native gas token's TokenId. PLACEHOLDER value mirrored from the
 # SDK demo for now; we own this and replace with the real
-# Ligate-derived AVOW TokenId before any external devnet tag.
+# Ligate-derived `AVOW` TokenId before any external devnet tag.
 # Tracking: file a follow-up issue once the SDK upgrade lands.
 GAS_TOKEN_ID = { bech32 = "token_1nyl0e0yweragfsatygt24zmd8jrr2vqtvdfptzjhxkguz2xxx3vs0y07u7", type = "TokenId" }
 
 # **The Ligate HRP.** This is the whole reason we did the SDK upgrade
 # (#59). Every account address minted on this chain is bech32-encoded
-# with this prefix. Per #46, the Ligate-side identifier ladder is:
+# with this prefix. Per #46, the Ligate-side identifier ladder
+# **shipped in v0** is:
 #   lig1   - account addresses (THIS CONSTANT)
 #   lpk1   - public keys (separate, encoded by client-rs)
 #   lsc1   - schema ids (computed by attestation module, encoded by client-rs)
 #   las1   - attestor-set ids
-#   lat1   - attestation ids
-#   ltx1   - tx hashes
 #   lph1   - payload hashes
-#   lcc1   - NFT collection ids (when `nft` module ships in v1)
-#   ltk1   - fungible token denominations (when `tokens` module ships in v1)
+# Planned for v0.2.0 (not yet wired):
+#   lat1   - attestation ids
 ADDRESS_PREFIX = { const = "lig" }
 
 # Gas costs for state access. Mirrored from SDK demo defaults; revisit
@@ -198,6 +197,8 @@ BLACKLIST_DISCRIMINANT = 20
 # from the type name. Our struct is `AttestationModule`, hence
 # `ATTESTATION_MODULE_DISCRIMINANT`.
 ATTESTATION_MODULE_DISCRIMINANT = 21
+BOUNTY_DISCRIMINANT = 22
+CONTRACTS_DISCRIMINANT = 23
 
 # SDK test-module discriminants. Carried verbatim because the SDK's
 # own crate graph includes these modules behind feature flags and
