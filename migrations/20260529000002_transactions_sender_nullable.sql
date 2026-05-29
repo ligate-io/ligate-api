@@ -1,0 +1,19 @@
+-- Drop the leftover NOT NULL on transactions.sender.
+--
+-- 20260509000002_loosen_chain_elided_columns.sql loosened the
+-- chain-elided tx columns (sender_pubkey, nonce, fee_paid_nano) but
+-- missed `sender`. The indexer's `insert_transaction` already treats
+-- sender as optional: it derives it from the decoded event payload
+-- (Transfer.from / RegisterSchema.owner / SubmitAttestation.submitter)
+-- and binds NULL for the bounty + contract module kinds (their thin
+-- events carry no single clean sender; poster/worker/arbiter live only
+-- in the hydrated record) and for Unknown.
+--
+-- With sender still NOT NULL, every PostBounty / PostContract tx-row
+-- INSERT failed with a not-null violation. The ingest loop logs
+-- "inserting tx; continuing" and advances the cursor, and the
+-- resource-row fan-out only runs after the tx row lands, so the
+-- bounty/contract row was never written. Net effect: /v1/bounties and
+-- /v1/contracts stayed empty even though the on-chain events executed
+-- successfully (observed on devnet-3, chain v0.4.0).
+ALTER TABLE transactions ALTER COLUMN sender DROP NOT NULL;
