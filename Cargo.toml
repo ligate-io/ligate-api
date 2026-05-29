@@ -95,10 +95,10 @@ bech32 = "0.11"
 # instead of drifting on every chain main commit. Bump the tag
 # deliberately when intentionally consuming a new chain release
 # (and update CHANGELOG with the wire-format implications).
-ligate-client = { git = "https://github.com/ligate-io/ligate-chain.git", tag = "v0.3.0", features = ["submit"] }
-ligate-stf    = { git = "https://github.com/ligate-io/ligate-chain.git", tag = "v0.3.0", features = ["native"] }
-ligate-rollup = { git = "https://github.com/ligate-io/ligate-chain.git", tag = "v0.3.0" }
-attestation   = { git = "https://github.com/ligate-io/ligate-chain.git", tag = "v0.3.0", features = ["native"] }
+ligate-client = { git = "https://github.com/ligate-io/ligate-chain.git", tag = "v0.4.0", features = ["submit"] }
+ligate-stf    = { git = "https://github.com/ligate-io/ligate-chain.git", tag = "v0.4.0", features = ["native"] }
+ligate-rollup = { git = "https://github.com/ligate-io/ligate-chain.git", tag = "v0.4.0" }
+attestation   = { git = "https://github.com/ligate-io/ligate-chain.git", tag = "v0.4.0", features = ["native"] }
 
 # Sovereign SDK pieces we directly construct. Pinned at upstream
 # `f89964c66`; redirected to our fork by the `[patch]` block at the

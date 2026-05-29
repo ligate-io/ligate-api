@@ -612,8 +612,8 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "attestation"
-version = "0.3.0"
-source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.3.0#d538ccbbb652872e7df1063c199983add8ec9980"
+version = "0.4.0"
+source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.4.0#13ffbfd875b4b59196a59b791647997624ad9bd4"
 dependencies = [
  "anyhow",
  "borsh",
@@ -957,6 +957,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "bounty"
+version = "0.4.0"
+source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.4.0#13ffbfd875b4b59196a59b791647997624ad9bd4"
+dependencies = [
+ "anyhow",
+ "attestation",
+ "borsh",
+ "prometheus",
+ "schemars 0.8.22",
+ "serde",
+ "sha2 0.11.0",
+ "sov-bank",
+ "sov-chain-state",
+ "sov-modules-api",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1516,6 +1534,25 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-xid",
+]
+
+[[package]]
+name = "contract"
+version = "0.4.0"
+source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.4.0#13ffbfd875b4b59196a59b791647997624ad9bd4"
+dependencies = [
+ "anyhow",
+ "attestation",
+ "borsh",
+ "hex",
+ "prometheus",
+ "schemars 0.8.22",
+ "serde",
+ "sha2 0.11.0",
+ "sov-bank",
+ "sov-chain-state",
+ "sov-modules-api",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4026,8 +4063,8 @@ dependencies = [
 
 [[package]]
 name = "ligate-client"
-version = "0.3.0"
-source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.3.0#d538ccbbb652872e7df1063c199983add8ec9980"
+version = "0.4.0"
+source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.4.0#13ffbfd875b4b59196a59b791647997624ad9bd4"
 dependencies = [
  "anyhow",
  "attestation",
@@ -4045,8 +4082,8 @@ dependencies = [
 
 [[package]]
 name = "ligate-prover-risc0"
-version = "0.3.0"
-source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.3.0#d538ccbbb652872e7df1063c199983add8ec9980"
+version = "0.4.0"
+source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.4.0#13ffbfd875b4b59196a59b791647997624ad9bd4"
 dependencies = [
  "anyhow",
  "risc0-build",
@@ -4055,15 +4092,17 @@ dependencies = [
 
 [[package]]
 name = "ligate-rollup"
-version = "0.3.0"
-source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.3.0#d538ccbbb652872e7df1063c199983add8ec9980"
+version = "0.4.0"
+source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.4.0#13ffbfd875b4b59196a59b791647997624ad9bd4"
 dependencies = [
  "anyhow",
  "async-trait",
  "attestation",
  "axum",
  "borsh",
+ "bounty",
  "clap",
+ "contract",
  "ligate-prover-risc0",
  "ligate-stf",
  "prometheus",
@@ -4098,12 +4137,14 @@ dependencies = [
 
 [[package]]
 name = "ligate-stf"
-version = "0.3.0"
-source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.3.0#d538ccbbb652872e7df1063c199983add8ec9980"
+version = "0.4.0"
+source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.4.0#13ffbfd875b4b59196a59b791647997624ad9bd4"
 dependencies = [
  "anyhow",
  "attestation",
  "borsh",
+ "bounty",
+ "contract",
  "ligate-stf-declaration",
  "schemars 0.8.22",
  "serde",
@@ -4127,12 +4168,14 @@ dependencies = [
 
 [[package]]
 name = "ligate-stf-declaration"
-version = "0.3.0"
-source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.3.0#d538ccbbb652872e7df1063c199983add8ec9980"
+version = "0.4.0"
+source = "git+https://github.com/ligate-io/ligate-chain.git?tag=v0.4.0#13ffbfd875b4b59196a59b791647997624ad9bd4"
 dependencies = [
  "anyhow",
  "attestation",
  "borsh",
+ "bounty",
+ "contract",
  "schemars 0.8.22",
  "serde",
  "sov-accounts",
