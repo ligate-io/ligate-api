@@ -27,12 +27,14 @@
 pub mod attestation_id;
 mod client;
 mod db;
+mod decode;
 mod error;
 mod ingest;
 mod parser;
 
 pub use client::NodeClient;
 pub use db::connect;
+pub use decode::{decode_tx_body, DecodedTxBody};
 pub use error::IndexerError;
 pub use ingest::run as run_ingest;
 pub use parser::{
@@ -58,6 +60,11 @@ pub struct IndexerConfig {
     /// Slot height to start backfilling from. `None` means resume from
     /// the last indexed slot in the DB (or `1` if the DB is empty).
     pub start_height: Option<u64>,
+    /// Numeric rollup chain id (the `CHAIN_ID` the api is configured
+    /// with, e.g. `4242` for devnet-3). Used to anchor the tail parse
+    /// when decoding a tx body's nonce; a mismatch nulls the nonce
+    /// rather than risking a bogus value. See [`crate::decode`].
+    pub numeric_chain_id: u64,
 }
 
 /// Entry point: connect, run migrations, kick off the ingest loop.
@@ -70,5 +77,5 @@ pub struct IndexerConfig {
 pub async fn run(cfg: IndexerConfig) -> Result<()> {
     let client = NodeClient::new(&cfg.rpc_url)?;
     let pool = connect(&cfg.database_url).await?;
-    run_ingest(client, pool, cfg.start_height).await
+    run_ingest(client, pool, cfg.start_height, cfg.numeric_chain_id).await
 }

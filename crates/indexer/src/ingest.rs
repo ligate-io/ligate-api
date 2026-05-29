@@ -43,7 +43,16 @@ const FINALITY_REPOLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Run the indexer end-to-end. Bootstraps chain identity, then loops
 /// forever between catching up to the head and tailing.
-pub async fn run(client: NodeClient, pool: PgPool, start_height: Option<u64>) -> ! {
+///
+/// `numeric_chain_id` anchors the tx-body nonce decode (see
+/// [`crate::decode`]); it's the rollup's numeric chain id, threaded down
+/// to every `insert_transaction` call.
+pub async fn run(
+    client: NodeClient,
+    pool: PgPool,
+    start_height: Option<u64>,
+    numeric_chain_id: u64,
+) -> ! {
     // Bootstrap. If the node is unreachable on startup, we keep
     // retrying rather than failing fast — the indexer might be coming
     // up before the node in a docker-compose unit.
@@ -170,7 +179,9 @@ pub async fn run(client: NodeClient, pool: PgPool, start_height: Option<u64>) ->
                     // backfill PR can re-walk slots whose tx ingest
                     // failed by comparing tx_count to actual row
                     // counts in the transactions table.
-                    if let Err(e) = ingest_slot_transactions(&client, &pool, &slot).await {
+                    if let Err(e) =
+                        ingest_slot_transactions(&client, &pool, &slot, numeric_chain_id).await
+                    {
                         warn!(error = %e, height = h, "ingesting slot transactions; continuing");
                     }
                     if let Err(e) = db::write_last_indexed_height(&pool, h).await {
@@ -210,6 +221,7 @@ async fn ingest_slot_transactions(
     client: &NodeClient,
     pool: &PgPool,
     slot: &SlotResponse,
+    numeric_chain_id: u64,
 ) -> Result<(), IndexerError> {
     let Some(batch_range) = slot.batch_range else {
         // Slot doesn't expose a batch_range — chain rev that doesn't
@@ -265,6 +277,13 @@ async fn ingest_slot_transactions(
 
             let raw_event_keys: Vec<String> = tx_events.iter().map(|e| e.key.clone()).collect();
 
+            // Decode the persisted signed-tx body (present for txs
+            // ingested after `save_tx_bodies` was enabled, ligate-chain#551)
+            // to recover the real signer pubkey + nonce. `None` for
+            // body-less txs; insert_transaction then writes NULLs +
+            // falls back to event-derived sender, exactly as before.
+            let decoded = crate::decode::decode_tx_body(&tx.body.data, numeric_chain_id);
+
             if let Some(classified) = parser::classify_tx(&tx, &tx_events) {
                 if let Err(e) = db::insert_transaction(
                     pool,
@@ -272,6 +291,7 @@ async fn ingest_slot_transactions(
                     slot.number,
                     position_in_slot,
                     &raw_event_keys,
+                    decoded.as_ref(),
                 )
                 .await
                 {

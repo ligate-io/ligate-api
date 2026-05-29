@@ -209,6 +209,9 @@ async fn main() -> Result<()> {
         rpc_url: config.chain_rpc.clone(),
         database_url: config.database_url.clone(),
         start_height: config.indexer_start_height,
+        // Anchors the tx-body nonce decode (#550). Same numeric chain id
+        // the drip signer signs with.
+        numeric_chain_id: config.chain_id,
     };
     tokio::spawn(async move {
         if let Err(e) = ligate_api_indexer::run(indexer_cfg).await {
