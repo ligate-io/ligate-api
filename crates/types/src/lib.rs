@@ -1376,3 +1376,101 @@ mod tests {
         assert_eq!(parsed.raw.get("future_field").unwrap(), "future_value");
     }
 }
+
+// ============================================================================
+// Bounty module events (`/v1/ledger/events`)
+// ============================================================================
+
+/// `Bounty/BountyPosted` event wrapper emitted by the bounty module.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BountyBountyPostedEvent {
+    /// Inner event payload.
+    pub bounty_posted: BountyPostedPayload,
+}
+
+/// Inner `BountyPosted` payload.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BountyPostedPayload {
+    /// Chain bounty id.
+    pub bounty_id: String,
+    /// Poster address (`lig1...`).
+    pub poster: String,
+    /// Escrow pool in nanos, encoded as decimal string to preserve precision.
+    pub pool: String,
+}
+
+/// `Bounty/BountyClaimed` event wrapper emitted by the bounty module.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BountyBountyClaimedEvent {
+    /// Inner event payload.
+    pub bounty_claimed: BountyClaimedPayload,
+}
+
+/// Inner `BountyClaimed` payload.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BountyClaimedPayload {
+    /// Chain bounty id.
+    pub bounty_id: String,
+    /// Attestation id that satisfied the bounty predicate.
+    pub attestation_id: String,
+    /// Payout amount in nanos, encoded as decimal string to preserve precision.
+    pub payout: String,
+    /// Attester address (`lig1...`).
+    pub attester: String,
+}
+
+/// `Bounty/BountyDisputed` event wrapper emitted by the bounty module.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BountyBountyDisputedEvent {
+    /// Inner event payload.
+    pub bounty_disputed: BountyDisputedPayload,
+}
+
+/// Inner `BountyDisputed` payload.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BountyDisputedPayload {
+    /// Chain bounty id.
+    pub bounty_id: String,
+    /// Disputed attestation id.
+    pub attestation_id: String,
+    /// Disputer address (`lig1...`).
+    pub disputer: String,
+    /// Bond amount in nanos, encoded as decimal string to preserve precision.
+    pub bond: String,
+}
+
+/// `Bounty/DisputeResolved` event wrapper emitted by the bounty module.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BountyDisputeResolvedEvent {
+    /// Inner event payload.
+    pub dispute_resolved: BountyDisputeResolvedPayload,
+}
+
+/// Inner `DisputeResolved` payload.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BountyDisputeResolvedPayload {
+    /// Chain bounty id.
+    pub bounty_id: String,
+    /// Resolved attestation id.
+    pub attestation_id: String,
+    /// Chain decision string.
+    pub decision: String,
+    /// Address receiving the dispute bond (`lig1...`).
+    pub bond_recipient: String,
+}
+
+/// `Bounty/BountyExpired` event wrapper emitted by the bounty module.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BountyBountyExpiredEvent {
+    /// Inner event payload.
+    pub bounty_expired: BountyExpiredPayload,
+}
+
+/// Inner `BountyExpired` payload.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BountyExpiredPayload {
+    /// Chain bounty id.
+    pub bounty_id: String,
+    /// Poster/refund recipient address (`lig1...`).
+    pub refunded_to_poster: String,
+}
