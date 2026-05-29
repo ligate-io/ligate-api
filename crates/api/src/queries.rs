@@ -1314,3 +1314,150 @@ pub async fn bounties_matching_address(
         })
         .collect())
 }
+
+/// One row of the `bounties` table, mapped to a Rust shape. Mirrors
+/// the table definition in `migrations/20260528000001_bounties.sql`.
+/// The handler converts this to
+/// [`crate::responses::BountyDetailResponse`].
+#[derive(Debug)]
+pub struct BountyRow {
+    /// Bech32m `lbt1...` bounty id.
+    pub id: String,
+    /// Poster address (the chain emits a raw bech32m `lig1...` string;
+    /// stored verbatim).
+    pub poster: String,
+    /// Bech32m `lsc1...` of the bounty board schema.
+    pub board_schema_id: String,
+    /// Original pool size in AVOW nanos (u128 decimal string).
+    pub pool_nano: String,
+    /// Per-accepted-claim payout in AVOW nanos (u128 decimal string).
+    pub per_attestation_nano: String,
+    /// Remaining escrow at the indexer's last seen event (u128 string).
+    pub escrow_remaining_nano: String,
+    /// One of `open`/`exhausted`/`expired`/`cancelled`/`finalised`.
+    pub status: String,
+    /// Acceptance predicate as compact JSONB (pass-through).
+    pub acceptance: Value,
+    /// DA-layer block height the bounty expires at.
+    pub expiry_da_height: i64,
+    /// Dispute window in chain blocks.
+    pub dispute_window_blocks: i32,
+    /// Slot the PostBounty tx landed in.
+    pub posted_at_slot: i64,
+    /// Tx hash of the PostBounty tx.
+    pub posted_at_tx: String,
+    /// Timestamp of the PostBounty tx.
+    pub posted_at_timestamp: DateTime<Utc>,
+    /// Running count of `BountyClaimed` events seen.
+    pub claim_count: i32,
+    /// Slot of the most recent claim; `None` if never claimed.
+    pub last_claim_at_slot: Option<i64>,
+}
+
+#[allow(clippy::type_complexity)]
+type BountyTuple = (
+    String,        // id
+    String,        // poster
+    String,        // board_schema_id
+    String,        // pool_nano
+    String,        // per_attestation_nano
+    String,        // escrow_remaining_nano
+    String,        // status
+    Value,         // acceptance
+    i64,           // expiry_da_height
+    i32,           // dispute_window_blocks
+    i64,           // posted_at_slot
+    String,        // posted_at_tx
+    DateTime<Utc>, // posted_at_timestamp
+    i32,           // claim_count
+    Option<i64>,   // last_claim_at_slot
+);
+
+fn bounty_row_from_tuple(t: BountyTuple) -> BountyRow {
+    BountyRow {
+        id: t.0,
+        poster: t.1,
+        board_schema_id: t.2,
+        pool_nano: t.3,
+        per_attestation_nano: t.4,
+        escrow_remaining_nano: t.5,
+        status: t.6,
+        acceptance: t.7,
+        expiry_da_height: t.8,
+        dispute_window_blocks: t.9,
+        posted_at_slot: t.10,
+        posted_at_tx: t.11,
+        posted_at_timestamp: t.12,
+        claim_count: t.13,
+        last_claim_at_slot: t.14,
+    }
+}
+
+/// The `SELECT` column list shared by [`bounty_by_id`] and
+/// [`bounties_page`]. Order MUST match [`BountyTuple`].
+const BOUNTY_COLUMNS: &str = "id, poster, board_schema_id, pool_nano, per_attestation_nano,
+            escrow_remaining_nano, status, acceptance, expiry_da_height,
+            dispute_window_blocks, posted_at_slot, posted_at_tx, posted_at_timestamp,
+            claim_count, last_claim_at_slot";
+
+/// Read one bounty by its bech32m `lbt1...` id. `None` if not yet
+/// indexed (the indexer hasn't seen a `Bounty/*` event for it, or it
+/// doesn't exist).
+pub async fn bounty_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<BountyRow>> {
+    let sql = format!("SELECT {BOUNTY_COLUMNS} FROM bounties WHERE id = $1");
+    let row = sqlx::query_as::<_, BountyTuple>(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(bounty_row_from_tuple))
+}
+
+/// Cursor shape for `/v1/bounties` (compound: `(posted_at_slot, id)`
+/// DESC). The id tiebreaker handles bounties posted in the same slot.
+pub struct BountiesCursor {
+    pub posted_at_slot: i64,
+    pub id: String,
+}
+
+/// Read a page of bounties, descending by `(posted_at_slot, id)`.
+///
+/// Optional filters compose multiplicatively (same
+/// `($N::TYPE IS NULL OR ...)` collapse pattern as [`txs_page`] /
+/// [`schemas_page`], so the inert filter costs nothing at plan time):
+/// - `board` narrows to a single `board_schema_id` (`lsc1...`)
+/// - `status` narrows to a single lifecycle state
+///   (`open`/`exhausted`/`expired`/`cancelled`/`finalised`)
+/// - `before` is the pagination cursor; `None` starts at the head
+///
+/// Fetches `limit + 1` rows for has-more detection (same trick as the
+/// other list queries).
+pub async fn bounties_page(
+    pool: &PgPool,
+    board: Option<&str>,
+    status: Option<&str>,
+    before: Option<BountiesCursor>,
+    limit_plus_one: i64,
+) -> sqlx::Result<Vec<BountyRow>> {
+    let (cursor_slot, cursor_id): (Option<i64>, Option<String>) = match before {
+        Some(c) => (Some(c.posted_at_slot), Some(c.id)),
+        None => (None, None),
+    };
+    let sql = format!(
+        "SELECT {BOUNTY_COLUMNS}
+         FROM bounties
+         WHERE ($1::TEXT   IS NULL OR board_schema_id = $1)
+           AND ($2::TEXT   IS NULL OR status = $2)
+           AND ($3::BIGINT IS NULL OR (posted_at_slot, id) < ($3, $4))
+         ORDER BY posted_at_slot DESC, id DESC
+         LIMIT $5"
+    );
+    let rows: Vec<BountyTuple> = sqlx::query_as(&sql)
+        .bind(board)
+        .bind(status)
+        .bind(cursor_slot)
+        .bind(cursor_id)
+        .bind(limit_plus_one)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(bounty_row_from_tuple).collect())
+}

@@ -25,7 +25,7 @@ use tracing::{debug, error, info, warn};
 use crate::client::NodeClient;
 use crate::db::{self, AddressRole};
 use crate::error::IndexerError;
-use crate::parser::{self, IndexerTx};
+use crate::parser::{self, BountyEventKind, IndexerTx};
 
 /// How long to wait between head-checks once we've caught up.
 const TAIL_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -299,13 +299,14 @@ async fn ingest_slot_transactions(
                         );
                     }
                     if let Err(e) =
-                        insert_resource_rows(pool, &classified, slot.number, slot_timestamp).await
+                        insert_resource_rows(client, pool, &classified, slot.number, slot_timestamp)
+                            .await
                     {
                         warn!(
                             error = %e,
                             tx_hash = %classified.hash,
                             slot = slot.number,
-                            "inserting resource rows (attestor_set/schema/attestation); continuing"
+                            "inserting resource rows (attestor_set/schema/attestation/bounty); continuing"
                         );
                     }
                 }
@@ -334,14 +335,23 @@ async fn ingest_slot_transactions(
 ///   + bump `address_summaries.schemas_owned_count` for the owner.
 /// - `SubmitAttestation` -> `attestations` row + bump
 ///   `schemas.attestation_count`.
+/// - `BountyEvent` -> hydrate the bounty via the chain RPC and upsert
+///   the `bounties` row; for claims also apply the escrow decrement +
+///   claim_count bump; for terminal events zero the escrow.
 /// - Other kinds (Transfer, Unknown) -> nothing.
 ///
 /// Each step is best-effort: an FK failure or transient Postgres
 /// error on one bump doesn't abort the rest of the ingest, and the
 /// tx row itself is already committed by this point. A re-index can
 /// recompute counters from the source-of-truth tables (schemas /
-/// attestations) if drift is observed.
+/// attestations / bounties) if drift is observed.
+///
+/// `client` is threaded through because the bounty path re-hydrates
+/// the full record from chain state (`Bounty/*` events are thin and
+/// don't carry the board schema / acceptance / status); the other
+/// kinds carry everything in their decoded event payload.
 async fn insert_resource_rows(
+    client: &NodeClient,
     pool: &PgPool,
     classified: &parser::ClassifiedTx,
     slot_height: u64,
@@ -394,6 +404,72 @@ async fn insert_resource_rows(
                 );
             }
         }
+        IndexerTx::BountyEvent { bounty_id, kind } => {
+            // Hydrate the full record on EVERY bounty event: the events
+            // are thin, and the chain state is authoritative for status
+            // (incl. the Cancelled-vs-Expired disambiguation) + the
+            // static board/acceptance/expiry fields. A 404 here means
+            // the chain doesn't (yet) know the bounty — log and bail
+            // for this tx rather than insert a half-row; a later event
+            // or backfill re-hydrates.
+            let Some(rec) = client.bounty_at(bounty_id).await? else {
+                warn!(
+                    %bounty_id,
+                    slot = slot_height,
+                    "bounty hydrate returned 404; skipping bounty upsert for this event"
+                );
+                return Ok(());
+            };
+            db::upsert_bounty(
+                pool,
+                bounty_id,
+                &rec,
+                slot_height,
+                &classified.hash,
+                slot_timestamp,
+            )
+            .await?;
+
+            // Per-event deltas on top of the hydrated record.
+            match kind {
+                BountyEventKind::Claimed {
+                    count,
+                    total_payout,
+                } => {
+                    if let Err(e) = db::apply_bounty_claim(
+                        pool,
+                        bounty_id,
+                        total_payout,
+                        i32::try_from(*count).unwrap_or(i32::MAX),
+                        slot_height,
+                    )
+                    .await
+                    {
+                        warn!(
+                            error = %e,
+                            %bounty_id,
+                            "applying bounty claim delta; escrow/claim_count stale"
+                        );
+                    }
+                }
+                BountyEventKind::Expired | BountyEventKind::Finalised => {
+                    // Terminal: residual escrow refunded/swept on-chain.
+                    if let Err(e) = db::set_bounty_escrow_zero(pool, bounty_id).await {
+                        warn!(
+                            error = %e,
+                            %bounty_id,
+                            "zeroing bounty escrow on terminal event; escrow stale"
+                        );
+                    }
+                }
+                BountyEventKind::Posted
+                | BountyEventKind::Disputed
+                | BountyEventKind::DisputeResolved => {
+                    // Status refresh from the hydrate above is enough;
+                    // no escrow/claim delta for these.
+                }
+            }
+        }
         IndexerTx::Transfer(_) | IndexerTx::Unknown { .. } => {
             // No resource rows to insert for transfers or unknown
             // kinds. Address-summary counters are maintained by
@@ -418,12 +494,17 @@ async fn update_address_summaries(
 ) -> Result<(), IndexerError> {
     // Resolve the sender address per-kind. None for `Unknown` since
     // the chain elides the body and we have no event-side evidence.
+    // Bounty events are left out of address_summaries for Phase 1:
+    // the BountyEvent variant doesn't carry a single clean "sender"
+    // (Posted's poster lives only in the hydrated record, not here),
+    // matching how only Transfer contributes a receiver. The bounty
+    // poster/claimant address-activity rollup is a follow-up.
     let sender: Option<&str> = match &classified.kind {
         IndexerTx::Transfer(t) => Some(t.from.as_str()),
         IndexerTx::RegisterAttestorSet(d) => Some(d.registered_by.as_str()),
         IndexerTx::RegisterSchema(d) => Some(d.owner.as_str()),
         IndexerTx::SubmitAttestation(d) => Some(d.submitter.as_str()),
-        IndexerTx::Unknown { .. } => None,
+        IndexerTx::BountyEvent { .. } | IndexerTx::Unknown { .. } => None,
     };
 
     if let Some(addr) = sender {

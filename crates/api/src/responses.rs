@@ -506,3 +506,48 @@ pub struct BountyMatchEntry {
     /// board schema.
     pub my_attestation_count: i64,
 }
+
+// ---- bounty detail / list ---------------------------------------------------
+
+/// One bounty, served at `GET /v1/bounties/{bountyId}` and as each
+/// element of the list at `GET /v1/bounties`.
+///
+/// Mirrors the `bounties` table the indexer populates from `Bounty/*`
+/// chain events (with the full record hydrated from chain state). u128
+/// amounts are decimal strings per RFC 0002; `acceptance` is a
+/// pass-through JSON value mirroring the chain's `AcceptancePredicate`.
+#[derive(Debug, serde::Serialize)]
+pub struct BountyDetailResponse {
+    /// Bech32m `lbt1...` bounty id.
+    pub id: String,
+    /// Poster address (bech32m `lig1...`). Receives escrow refunds on
+    /// cancel and rejected-dispute bond payouts.
+    pub poster: String,
+    /// Bech32m `lsc1...` of the bounty board schema.
+    pub board_schema_id: String,
+    /// Original pool size at PostBounty time, AVOW nanos (decimal
+    /// string for u128).
+    pub pool_nano: String,
+    /// Payout per accepted claim, AVOW nanos (decimal string).
+    pub per_attestation_nano: String,
+    /// Remaining escrow at the indexer's last seen event (decimal
+    /// string). Decremented on each claim; `0` after expiry/finalise.
+    pub escrow_remaining_nano: String,
+    /// Lifecycle state: `open`/`exhausted`/`expired`/`cancelled`/`finalised`.
+    pub status: String,
+    /// Acceptance predicate, compact JSON mirroring the chain's
+    /// `AcceptancePredicate` enum (pass-through from the indexer's
+    /// `bounties.acceptance` JSONB column).
+    pub acceptance: serde_json::Value,
+    /// DA-layer block height the bounty expires at.
+    pub expiry_da_height: i64,
+    /// Dispute window in chain blocks.
+    pub dispute_window_blocks: i32,
+    /// Running count of `BountyClaimed` events seen against this bounty.
+    pub claim_count: i32,
+    /// Provenance of the PostBounty tx.
+    pub posted_at: RegisteredAtResponse,
+    /// Slot of the most recent claim. `null` if the bounty has never
+    /// been claimed.
+    pub last_claim_at_slot: Option<i64>,
+}
