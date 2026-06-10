@@ -1435,6 +1435,7 @@ pub async fn bounties_page(
     pool: &PgPool,
     board: Option<&str>,
     status: Option<&str>,
+    poster: Option<&str>,
     before: Option<BountiesCursor>,
     limit_plus_one: i64,
 ) -> sqlx::Result<Vec<BountyRow>> {
@@ -1447,13 +1448,15 @@ pub async fn bounties_page(
          FROM bounties
          WHERE ($1::TEXT   IS NULL OR board_schema_id = $1)
            AND ($2::TEXT   IS NULL OR status = $2)
-           AND ($3::BIGINT IS NULL OR (posted_at_slot, id) < ($3, $4))
+           AND ($3::TEXT   IS NULL OR poster = $3)
+           AND ($4::BIGINT IS NULL OR (posted_at_slot, id) < ($4, $5))
          ORDER BY posted_at_slot DESC, id DESC
-         LIMIT $5"
+         LIMIT $6"
     );
     let rows: Vec<BountyTuple> = sqlx::query_as(&sql)
         .bind(board)
         .bind(status)
+        .bind(poster)
         .bind(cursor_slot)
         .bind(cursor_id)
         .bind(limit_plus_one)
@@ -1611,4 +1614,70 @@ pub async fn contracts_page(
         .fetch_all(pool)
         .await?;
     Ok(rows.into_iter().map(contract_row_from_tuple).collect())
+}
+
+// v0 contract matching: `status='open' AND poster <> $1` (chain rejects self-commits; tag/skill narrowing per docs/protocol/contract-primitive.md is api#77 follow-up).
+
+/// Skinny row backing `/v1/contracts/matching/{address}`.
+#[derive(Debug)]
+pub struct ContractMatchRow {
+    pub id: String,
+    pub poster: String,
+    pub arbiter: String,
+    pub criteria_doc_hash: String,
+    pub pool_nano: String,
+    pub escrow_remaining_nano: String,
+    pub arbiter_fee_bps: i32,
+    pub expiry_da_height: i64,
+    pub posted_at_slot: i64,
+}
+
+#[allow(clippy::type_complexity)]
+type ContractMatchTuple = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i32,
+    i64,
+    i64,
+);
+
+/// Open contracts the address could commit to, newest-first.
+pub async fn contracts_matching_address(
+    pool: &PgPool,
+    address: &str,
+    limit: i64,
+) -> sqlx::Result<Vec<ContractMatchRow>> {
+    let rows = sqlx::query_as::<_, ContractMatchTuple>(
+        "SELECT id, poster, arbiter, criteria_doc_hash, pool_nano,
+                escrow_remaining_nano, arbiter_fee_bps, expiry_da_height,
+                posted_at_slot
+         FROM contracts
+         WHERE status = 'open'
+           AND poster <> $1
+         ORDER BY posted_at_slot DESC, id DESC
+         LIMIT $2",
+    )
+    .bind(address)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|t| ContractMatchRow {
+            id: t.0,
+            poster: t.1,
+            arbiter: t.2,
+            criteria_doc_hash: t.3,
+            pool_nano: t.4,
+            escrow_remaining_nano: t.5,
+            arbiter_fee_bps: t.6,
+            expiry_da_height: t.7,
+            posted_at_slot: t.8,
+        })
+        .collect())
 }

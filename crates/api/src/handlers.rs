@@ -1649,6 +1649,7 @@ pub async fn bounties_list(
         &state.pg,
         params.board.as_deref(),
         params.status.as_deref(),
+        None,
         before,
         limit_plus_one,
     )
@@ -1878,4 +1879,172 @@ fn contract_row_to_response(row: queries::ContractRow) -> responses::ContractDet
                 .to_rfc3339_opts(SecondsFormat::Millis, true),
         },
     }
+}
+
+/// `GET /v1/contracts/matching/{address}`: open contracts the address could commit to (v0 excludes the poster only).
+pub async fn contracts_matching(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> impl IntoResponse {
+    const MATCH_LIMIT: i64 = 100;
+
+    let rows = match queries::contracts_matching_address(&state.pg, &address, MATCH_LIMIT).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, %address, "contracts_matching");
+            return internal_error();
+        }
+    };
+
+    let matches: Vec<responses::ContractMatchEntry> = rows
+        .into_iter()
+        .map(|r| responses::ContractMatchEntry {
+            id: r.id,
+            poster: r.poster,
+            arbiter: r.arbiter,
+            criteria_doc_hash: r.criteria_doc_hash,
+            pool_nano: r.pool_nano,
+            escrow_remaining_nano: r.escrow_remaining_nano,
+            arbiter_fee_bps: r.arbiter_fee_bps as u16,
+            expiry_da_height: r.expiry_da_height,
+            posted_at_slot: r.posted_at_slot,
+        })
+        .collect();
+
+    cached(
+        Json(responses::ContractMatchingResponse { address, matches }),
+        TTL_MODEST_SECS,
+    )
+}
+
+/// `GET /v1/addresses/{addr}/bounties`: same envelope as `/v1/bounties`, pre-filtered to `poster = addr`.
+pub async fn address_bounties(
+    State(state): State<AppState>,
+    Path(addr): Path<String>,
+    Query(params): Query<BountiesListParams>,
+) -> impl IntoResponse {
+    let limit = cursor::resolve_limit(params.limit);
+    let before = params
+        .before
+        .as_deref()
+        .and_then(cursor::decode::<BountiesCursor>)
+        .map(|c| queries::BountiesCursor {
+            posted_at_slot: c.slot as i64,
+            id: c.id,
+        });
+
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows = match queries::bounties_page(
+        &state.pg,
+        params.board.as_deref(),
+        params.status.as_deref(),
+        Some(&addr),
+        before,
+        limit_plus_one,
+    )
+    .await
+    {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(
+                error = %e, %addr, board = ?params.board, status = ?params.status,
+                "bounties_page in /v1/addresses/{{addr}}/bounties"
+            );
+            return internal_error();
+        }
+    };
+
+    let has_more = rows.len() as i64 > limit as i64;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+
+    let next = if has_more {
+        rows.last().and_then(|r| {
+            cursor::encode(&BountiesCursor {
+                slot: r.posted_at_slot as u64,
+                id: r.id.clone(),
+            })
+            .ok()
+        })
+    } else {
+        None
+    };
+
+    let data: Vec<responses::BountyDetailResponse> =
+        rows.into_iter().map(bounty_row_to_response).collect();
+
+    cached(
+        Json(Page {
+            data,
+            pagination: Pagination { next, limit },
+        }),
+        TTL_MODEST_SECS,
+    )
+}
+
+/// `GET /v1/addresses/{addr}/contracts`: same envelope as `/v1/contracts`, pre-filtered to `poster = addr`.
+pub async fn address_contracts(
+    State(state): State<AppState>,
+    Path(addr): Path<String>,
+    Query(params): Query<ContractsListParams>,
+) -> impl IntoResponse {
+    let limit = cursor::resolve_limit(params.limit);
+    let before = params
+        .before
+        .as_deref()
+        .and_then(cursor::decode::<ContractsCursor>)
+        .map(|c| queries::ContractsCursor {
+            posted_at_slot: c.slot as i64,
+            id: c.id,
+        });
+
+    let limit_plus_one = (limit as i64) + 1;
+    let mut rows = match queries::contracts_page(
+        &state.pg,
+        params.status.as_deref(),
+        Some(&addr),
+        params.arbiter.as_deref(),
+        before,
+        limit_plus_one,
+    )
+    .await
+    {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(
+                error = %e, %addr, status = ?params.status, arbiter = ?params.arbiter,
+                "contracts_page in /v1/addresses/{{addr}}/contracts"
+            );
+            return internal_error();
+        }
+    };
+
+    let has_more = rows.len() as i64 > limit as i64;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+
+    let next = if has_more {
+        rows.last().and_then(|r| {
+            cursor::encode(&ContractsCursor {
+                slot: r.posted_at_slot as u64,
+                id: r.id.clone(),
+            })
+            .ok()
+        })
+    } else {
+        None
+    };
+
+    let data: Vec<responses::ContractDetailResponse> =
+        rows.into_iter().map(contract_row_to_response).collect();
+
+    cached(
+        Json(Page {
+            data,
+            pagination: Pagination { next, limit },
+        }),
+        TTL_MODEST_SECS,
+    )
 }

@@ -596,3 +596,24 @@ pub struct ContractDetailResponse {
     /// Provenance of the PostContract tx.
     pub posted_at: RegisteredAtResponse,
 }
+
+/// Body of `GET /v1/contracts/matching/{address}`.
+#[derive(Debug, serde::Serialize)]
+pub struct ContractMatchingResponse {
+    pub address: String,
+    pub matches: Vec<ContractMatchEntry>,
+}
+
+/// One entry in [`ContractMatchingResponse`]; skinnier than [`ContractDetailResponse`].
+#[derive(Debug, serde::Serialize)]
+pub struct ContractMatchEntry {
+    pub id: String,
+    pub poster: String,
+    pub arbiter: String,
+    pub criteria_doc_hash: String,
+    pub pool_nano: String,
+    pub escrow_remaining_nano: String,
+    pub arbiter_fee_bps: u16,
+    pub expiry_da_height: i64,
+    pub posted_at_slot: i64,
+}
