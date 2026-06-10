@@ -249,6 +249,15 @@ async fn main() -> Result<()> {
         .route("/v1/txs/{hash}", get(handlers::tx_by_hash))
         .route("/v1/addresses/{addr}", get(handlers::address_summary))
         .route("/v1/addresses/{addr}/txs", get(handlers::address_txs))
+        // Buyer-dashboard surfaces: bounties / contracts posted by an address.
+        .route(
+            "/v1/addresses/{addr}/bounties",
+            get(handlers::address_bounties),
+        )
+        .route(
+            "/v1/addresses/{addr}/contracts",
+            get(handlers::address_contracts),
+        )
         .route("/v1/schemas", get(handlers::schemas_list))
         .route("/v1/schemas/{id}", get(handlers::schema_by_id))
         .route("/v1/attestor-sets", get(handlers::attestor_sets_list))
@@ -291,6 +300,10 @@ async fn main() -> Result<()> {
         // `/{contractId}` (3 segments) and the list route (`/v1/contracts`)
         // are distinct paths; axum disambiguates cleanly.
         .route("/v1/contracts", get(handlers::contracts_list))
+        .route(
+            "/v1/contracts/matching/{address}",
+            get(handlers::contracts_matching),
+        )
         .route("/v1/contracts/{contractId}", get(handlers::contract_detail))
         .route("/v1/search", get(handlers::search))
         // Aggregate analytics for the explorer + investor dashboard.
